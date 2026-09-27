@@ -22,7 +22,7 @@ fn rust_files_in(folder: &Path, found: &mut Vec<PathBuf>) {
 fn rust_files() -> Vec<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut found = Vec::new();
-    for krate in ["pbz2", "pbz2-cli", "pbz2-core"] {
+    for krate in ["pbz2", "pbz2-core"] {
         for folder in ["src", "tests"] {
             rust_files_in(&workspace.join(krate).join(folder), &mut found);
         }

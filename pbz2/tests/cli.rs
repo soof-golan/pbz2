@@ -12,7 +12,7 @@ struct Folder {
 
 impl Folder {
     fn new(test: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("pbz2-cli-{}-{test}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("pbz2-command-{}-{test}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("the folder can be made");
         Self { path }

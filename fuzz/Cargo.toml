@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pbz2 = { path = "../pbz2" }
+pbz2 = { path = "../pbz2", default-features = false, features = ["simd"] }
 bzip2 = "0.6"
 
 [workspace]

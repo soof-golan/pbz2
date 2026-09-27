@@ -30,10 +30,13 @@ encoder.finish()?;
 
 `Level` is 1 to 9. [`pbz2-core`](https://github.com/soof-golan/pbz2/blob/main/pbz2-core/README.md) is the `no_std` engine underneath.
 
+The default `cli` feature builds the `pbz2` command. A library without it:
+`pbz2 = { version = "0.1", default-features = false, features = ["simd"] }`.
+
 ## Command line
 
 ```sh
-cargo install pbz2-cli
+cargo install pbz2
 ```
 
 `pbz2` takes the same flags as `bzip2` for everyday use: `-z -d -t -c -k -f -q -v -1…-9

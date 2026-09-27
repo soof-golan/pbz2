@@ -41,7 +41,7 @@ slower.
 ## Releases
 
 Releases are made by the maintainer. Publish in dependency order: `pbz2-core`, then
-`pbz2`, then `pbz2-cli`.
+`pbz2`.
 
 This guide is adapted from uv's
 [CONTRIBUTING.md](https://github.com/astral-sh/uv/blob/main/CONTRIBUTING.md) (MIT or Apache-2.0).

@@ -481,24 +481,15 @@ name = "pbz2"
 version = "0.1.0"
 dependencies = [
  "bzip2",
+ "eyre",
  "fearless_simd",
  "insta",
+ "lexopt",
  "md-5",
  "pbz2-core",
  "proc-macro2",
  "rayon",
  "syn 2.0.119",
- "thiserror",
-]
-
-[[package]]
-name = "pbz2-cli"
-version = "0.1.0"
-dependencies = [
- "bzip2",
- "eyre",
- "lexopt",
- "pbz2",
  "thiserror",
 ]
 

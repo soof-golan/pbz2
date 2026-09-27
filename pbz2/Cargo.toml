@@ -6,22 +6,35 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Fast parallel bzip2 compression and decompression behind std::io::Read and Write"
+description = "Fast parallel bzip2 compression and decompression behind std::io::Read and Write, and a pbz2 command that replaces bzip2"
 readme = "../README.md"
-keywords = ["bzip2", "compression", "decompression", "parallel", "simd"]
-categories = ["compression"]
+keywords = ["bzip2", "compression", "decompression", "parallel", "cli"]
+categories = ["compression", "command-line-utilities"]
 include = ["src", "LICENSE", "NOTICE"]
+
+[[bin]]
+name = "pbz2"
+path = "src/cli/main.rs"
+doc = false
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
 
 [lints]
 workspace = true
 
 [features]
-default = ["simd"]
+default = ["simd", "cli"]
 simd = ["pbz2-core/simd", "dep:fearless_simd"]
+cli = ["dep:eyre", "dep:lexopt"]
 
 [dependencies]
 pbz2-core.workspace = true
+eyre = { workspace = true, optional = true }
 fearless_simd = { workspace = true, optional = true, features = ["std"] }
+lexopt = { workspace = true, optional = true }
 rayon.workspace = true
 thiserror = { workspace = true, features = ["std"] }
 

@@ -24,7 +24,7 @@ bzip2 blocks are independent, so each goes to its own core.
 ## Measuring
 
 ```sh
-cargo build --release -p pbz2-cli
+cargo build --release -p pbz2
 hyperfine -N --output=null 'target/release/pbz2 -c -n1 file' 'target/release/pbz2 -dc -n1 file.bz2'
 cargo bench -p pbz2-core --features simd
 ```
