@@ -1,0 +1,11 @@
+Test files from other bzip2 implementations, in the layout of bzip2-tests: a
+.bz2 file with a .md5 of what it decodes to, or a .bz2.bad file that must be
+refused.
+
+bzip2-rs/ (https://github.com/paolobarbolini/bzip2-rs, MIT or Apache-2.0):
+  byte arrays from its tests: empty_stream, trees_overflow, bad_num_selectors.
+
+commons-compress/ (https://github.com/apache/commons-compress, Apache-2.0):
+  lorem-ipsum.txt.bz2 and bzip2/hbCreateDecodeTables.bin from
+  src/test/resources, and the bzip2 member of the zip byte arrays in the
+  COMPRESS-516 and COMPRESS-519 tests of BZip2CompressorInputStreamTest.

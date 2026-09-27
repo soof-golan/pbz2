@@ -1,0 +1,37 @@
+[package]
+name = "pbz2-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The no_std core of pbz2: bzip2 compression and decompression that does not allocate and does no I/O, in pieces that run on any thread"
+readme = "README.md"
+keywords = ["bzip2", "compression", "no_std", "sans-io", "embedded"]
+categories = ["compression", "no-std", "no-std::no-alloc"]
+include = ["src", "LICENSE", "NOTICE", "README.md"]
+
+[package.metadata.docs.rs]
+features = ["simd"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+simd = ["dep:fearless_simd"]
+
+[dependencies]
+bytemuck.workspace = true
+fearless_simd = { workspace = true, optional = true, features = ["libm"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+bzip2.workspace = true
+criterion.workspace = true
+fearless_simd = { workspace = true, features = ["std"] }
+
+[[bench]]
+name = "blocks"
+harness = false

@@ -1,0 +1,34 @@
+[package]
+name = "pbz2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fast parallel bzip2 compression and decompression behind std::io::Read and Write"
+readme = "../README.md"
+keywords = ["bzip2", "compression", "decompression", "parallel", "simd"]
+categories = ["compression"]
+include = ["src", "LICENSE", "NOTICE"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["simd"]
+simd = ["pbz2-core/simd", "dep:fearless_simd"]
+
+[dependencies]
+pbz2-core.workspace = true
+fearless_simd = { workspace = true, optional = true, features = ["std"] }
+rayon.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+bzip2.workspace = true
+fearless_simd = { workspace = true, features = ["std"] }
+insta.workspace = true
+md-5.workspace = true
+proc-macro2.workspace = true
+syn.workspace = true

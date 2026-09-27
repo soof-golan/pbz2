@@ -1,0 +1,97 @@
+pbz2 is MIT licensed (see LICENSE). It includes material from bzip2 and
+libbzip2-rs under the license below:
+
+- pbz2-core/src/randomized.rs: the table of numbers bzip2 uses for randomized
+  blocks.
+- testdata/sample1.bz2, sample2.bz2, sample3.bz2 and their .ref files: the
+  sample files that ship with bzip2.
+- testdata/randomized-blocks.bin and testdata/issue_137.bin: from the
+  libbzip2-rs test suite.
+- The tests in pbz2/tests/samples.rs follow the decompression tests of
+  libbzip2-rs (https://github.com/trifectatechfoundation/libbzip2-rs) and
+  bzip2-rs (https://github.com/paolobarbolini/bzip2-rs, MIT or Apache-2.0).
+- The tests in pbz2/tests/compress.rs follow the compression tests of
+  libbzip2-rs and of the bzip2 crate
+  (https://github.com/trifectatechfoundation/bzip2-rs, MIT or Apache-2.0).
+
+The suffix sort in pbz2-core/src/divsufsort/ is a Rust translation of
+libdivsufsort 2.0 by Yuta Mori (https://github.com/y-256/libdivsufsort), under
+the MIT license below. pbz2 changed it to write the Burrows-Wheeler column
+straight into packed words and to report the row of a given suffix.
+
+  Copyright (c) 2003-2008 Yuta Mori All Rights Reserved.
+
+  Permission is hereby granted, free of charge, to any person
+  obtaining a copy of this software and associated documentation
+  files (the "Software"), to deal in the Software without
+  restriction, including without limitation the rights to use,
+  copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following
+  conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+  OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+  HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+  OTHER DEALINGS IN THE SOFTWARE.
+
+The bzip2-tests corpus (https://sourceware.org/git/bzip2-tests.git) is not
+included; scripts/fetch-test-corpus.sh downloads it. pbz2/tests/corpus.rs uses
+its commons-compress (Apache-2.0), dotnetzip (Ms-PL) and go (BSD) folders.
+
+testdata/other holds test inputs from bzip2-rs (MIT or Apache-2.0) and Apache
+Commons Compress (Apache-2.0); testdata/other/README says which. One large
+Commons Compress file is not included; scripts/fetch-test-corpus.sh downloads it.
+
+--------------------------------------------------------------------------
+
+The original program, "bzip2", the associated library "libbzip2", and all
+documentation, are
+
+Copyright (C) 1996-2021 Julian R Seward.
+Copyright (C) 2019-2020 Federico Mena Quintero
+Copyright (C) 2021 Micah Snyder
+
+This Rust translation, "libbzip2-rs" is a derived work based on "bzip2" and
+"libbzip2", and is Copyright (C) 2024-2025 Trifecta Tech Foundation and contributors
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. The origin of this software must not be misrepresented; you must
+   not claim that you wrote the original software.  If you use this
+   software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
+
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
+
+4. The name of the author may not be used to endorse or promote
+   products derived from this software without specific prior written
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Julian Seward, jseward@acm.org
+bzip2/libbzip2 version 1.1.0 of 6 September 2010

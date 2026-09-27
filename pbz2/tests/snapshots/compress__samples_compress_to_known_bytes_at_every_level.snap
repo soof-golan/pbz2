@@ -1,0 +1,85 @@
+---
+source: pbz2/tests/compress.rs
+expression: lines
+---
+empty, level 1: 14 bytes, md5 f3cea56bf9115371a573fa1aff5c8c33
+empty, level 2: 14 bytes, md5 1f1391e5e2e19b4fc8467c8c808d18fa
+empty, level 3: 14 bytes, md5 22266f98c1982759a8e267aa59dd6959
+empty, level 4: 14 bytes, md5 7a80350d44f7af1e2f1c4d7c4b31315c
+empty, level 5: 14 bytes, md5 6d7357c9f5ef4d57af462b7420c576a4
+empty, level 6: 14 bytes, md5 cb7560256c92852898935e17813fa236
+empty, level 7: 14 bytes, md5 8520631d5ea73dda1404dda4f909cc39
+empty, level 8: 14 bytes, md5 5e2efbe61a83d7482dc870c20327d35f
+empty, level 9: 14 bytes, md5 4059d198768f9f8dc9372dc1c54bc3c3
+one byte, level 1: 37 bytes, md5 92af9ac4dfbf8e99a5cf10d8d971b17b
+one byte, level 2: 37 bytes, md5 e09102202b5bf8290972cf021d75d803
+one byte, level 3: 37 bytes, md5 2475edc8479534d2b8948357a973865f
+one byte, level 4: 37 bytes, md5 ec6409f1c828ea1f8d6a6dec9a428a66
+one byte, level 5: 37 bytes, md5 da5c42d639eac44e820652c8dd6fe297
+one byte, level 6: 37 bytes, md5 6e41c9d446cfa28931d09e7e871772f1
+one byte, level 7: 37 bytes, md5 bba3de85e8c950054bdb383dd3536533
+one byte, level 8: 37 bytes, md5 65666917d05cceb1aa69bea2b7ab439e
+one byte, level 9: 37 bytes, md5 cd4c5d3a21081907960f422b375b3149
+every byte value, level 1: 421 bytes, md5 4e1665b54df0a6d0ae52c3d7be657a48
+every byte value, level 2: 421 bytes, md5 77dfd5bc045a64222a1dd96bdf98cafd
+every byte value, level 3: 421 bytes, md5 c7af1b70fd8aa1d46f1a884eaaa2a906
+every byte value, level 4: 421 bytes, md5 0db86fc76cd0bbf6f6e4aead6e340060
+every byte value, level 5: 421 bytes, md5 2435e2d63c33684d65bad5da789052cb
+every byte value, level 6: 421 bytes, md5 42e7596284ebb86db082dd50bd3e0511
+every byte value, level 7: 421 bytes, md5 8361eab12ca7dcfc82b6d9ddf29fd6db
+every byte value, level 8: 421 bytes, md5 3fa316bed5c835106ed27419371c2877
+every byte value, level 9: 421 bytes, md5 70ee44de2589f747813ffc6dee2aaff0
+zeros, level 1: 47 bytes, md5 fe0bea520b2873a0d2966730b2b7f655
+zeros, level 2: 47 bytes, md5 658f0fbe15fe95302841331014a14991
+zeros, level 3: 47 bytes, md5 982cb6d005412a36f0a7454a88300554
+zeros, level 4: 47 bytes, md5 a7cc10478e3f01356c1d41c8da6a8dc4
+zeros, level 5: 47 bytes, md5 df4e4ac315dc3bdd61b9303cbb69250f
+zeros, level 6: 47 bytes, md5 3f3017190524deb10dd45ee3ac8b2d2b
+zeros, level 7: 47 bytes, md5 84096b99116929cebdd8fa7b849c7b08
+zeros, level 8: 47 bytes, md5 e763b959ea6849cb965c807ff9083561
+zeros, level 9: 47 bytes, md5 3ea2a41249c9eaa422f2c9d8a6c66f74
+noise, level 1: 151381 bytes, md5 4b8f93d0d750c52977bd60443396573d
+noise, level 2: 151083 bytes, md5 73591b3a01b90b9946824936f7501972
+noise, level 3: 151083 bytes, md5 b8bb5b1e762d28ed80c5e3e45e43308d
+noise, level 4: 151083 bytes, md5 854c28bfa5a1972fc42a787e0de46a07
+noise, level 5: 151083 bytes, md5 2a1710e108b518add59856741bb2b4a1
+noise, level 6: 151083 bytes, md5 8a319715baf71aedcac3e37a5aae9e6e
+noise, level 7: 151083 bytes, md5 f3703d681656ceab59077c0bd8948228
+noise, level 8: 151083 bytes, md5 7a1fe7be89b2df9f9a8804b0226f89f5
+noise, level 9: 151083 bytes, md5 939b931434284b7ebe4237d2af0db81d
+text, level 1: 62021 bytes, md5 282590faf712a75cef5ea8fc72771cc3
+text, level 2: 61605 bytes, md5 e8edfce2366139af4bd1a2e24a67802a
+text, level 3: 62154 bytes, md5 59d498fd7b62376b6d46f29e63a95ec6
+text, level 4: 62135 bytes, md5 6156c34e6255b171cfeca9583bcf69bd
+text, level 5: 62135 bytes, md5 6cdee555c2fd87c56f2eb956c2a8124f
+text, level 6: 62135 bytes, md5 cdbfda711b82f2b54af0ba3ca8c718a1
+text, level 7: 62135 bytes, md5 8a31b69c3369ced3080589785d78e70f
+text, level 8: 62135 bytes, md5 0c93490d7c7de4f9339b87e61bc8e3f6
+text, level 9: 62135 bytes, md5 a61e58eabc7175f395a18e1efb859319
+runs of length 1 to 600, level 1: 2125 bytes, md5 411176c413e7bdffae29b22599c2eb8f
+runs of length 1 to 600, level 2: 2125 bytes, md5 fe7e3d756e4897313a2349a9ba75566d
+runs of length 1 to 600, level 3: 2125 bytes, md5 a6e02ab7ddbb1280254a1ceb18151bbd
+runs of length 1 to 600, level 4: 2125 bytes, md5 c5e87419f1f166475a440ebf009c52a6
+runs of length 1 to 600, level 5: 2125 bytes, md5 b9c5b9b4a30e6b46296a0c84ad77fbee
+runs of length 1 to 600, level 6: 2125 bytes, md5 9cecee3012e00ae2bb1eaa07226441aa
+runs of length 1 to 600, level 7: 2125 bytes, md5 59eb5e7dbb51f14136f3af82047ae075
+runs of length 1 to 600, level 8: 2125 bytes, md5 a9aef7709c855eed82922f4450722ce6
+runs of length 1 to 600, level 9: 2125 bytes, md5 02887d6ac275ab03c75aee81591a0dac
+four of a kind, level 1: 69 bytes, md5 d1efa8b9f0007f48c376741efd0de16c
+four of a kind, level 2: 69 bytes, md5 9d1d347850e6ffd6d5e99f8a1e660ff7
+four of a kind, level 3: 69 bytes, md5 130c357f181d428ce49e117144d38ab4
+four of a kind, level 4: 69 bytes, md5 50b87591ddae968535520a44fbd87a66
+four of a kind, level 5: 69 bytes, md5 6e1d73870f0cc764cac8da9d1b8e4432
+four of a kind, level 6: 69 bytes, md5 9cf851a28f0c1e9a0a571bdefda3c36b
+four of a kind, level 7: 69 bytes, md5 9f5bc5a9a8858a2a0744942595d9b1f0
+four of a kind, level 8: 69 bytes, md5 d18a767cdf62a8e081fc7b670c7cd73a
+four of a kind, level 9: 69 bytes, md5 8b4b1a04af8cb0e1eda0cbea4fac7c8c
+five of a kind, level 1: 69 bytes, md5 6cf10ab34fac163eff1cca566696c405
+five of a kind, level 2: 69 bytes, md5 0738049e9cadecb0a5531808d6cdabe2
+five of a kind, level 3: 69 bytes, md5 25394930c466f9c46a3a7f1e606f3d3f
+five of a kind, level 4: 69 bytes, md5 e94d49a3234a857b590b363b7c2a6707
+five of a kind, level 5: 69 bytes, md5 ee9c2dd40fa65e10a836ec41d913a4aa
+five of a kind, level 6: 69 bytes, md5 00981d21172bebbd7ad6a1f9fa9568db
+five of a kind, level 7: 69 bytes, md5 b3ef6ad25399b1131cccc5ba2987897f
+five of a kind, level 8: 69 bytes, md5 d68f39753c93a5a9d43fad9632befc93
+five of a kind, level 9: 69 bytes, md5 333cb401cd199125153b58b3bc2aafcb

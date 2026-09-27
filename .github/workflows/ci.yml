@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format, clippy, docs, no_std
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: thumbv7em-none-eabihf, wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo doc --workspace --no-deps
+      - run: cargo check -p pbz2-core --features simd --target thumbv7em-none-eabihf
+      - run: cargo check -p pbz2-core --features simd --target wasm32-unknown-unknown
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86_64, no SIMD features
+            runner: ubuntu-latest
+            rustflags: ""
+          - name: linux x86_64, SSE4.2 + PCLMULQDQ
+            runner: ubuntu-latest
+            rustflags: "-C target-feature=+sse4.2,+popcnt,+cmpxchg16b,+fxsr,+pclmulqdq"
+          - name: linux x86_64, AVX2
+            runner: ubuntu-latest
+            rustflags: "-C target-cpu=haswell"
+          - name: linux arm64, NEON
+            runner: ubuntu-24.04-arm
+            rustflags: ""
+          - name: macOS arm64, NEON
+            runner: macos-latest
+            rustflags: ""
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rustflags }}
+      - run: scripts/fetch-test-corpus.sh
+      - run: cargo test --workspace --release
+      - run: cargo test --workspace --release --no-default-features
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
