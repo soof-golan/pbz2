@@ -3,18 +3,18 @@ use std::io::{self, BufRead, Cursor, Read};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::thread;
 
+use crate::engine::{Engine, Pipeline, Started, Starts, on_engine, start};
+use crate::pool::{every_core, with_scratch};
+use crate::split::{Decoded, Kind, Segment, Spares, Splitter};
+use crate::workers::Workers;
 use pbz2_core::{
     Backend, Decoder, Error, MAX_COMPRESSED_BLOCK_BYTES, Pulled, SCRATCH_WORDS, StreamChecker,
 };
-use rayon::ThreadPool;
 
-use crate::engine::{Engine, Pipeline, Started, Starts, on_engine, start};
-use crate::pool::{every_core, pool, with_scratch};
-use crate::split::{Decoded, Kind, Segment, Spares, Splitter};
-
-const READ_BYTES: usize = 1 << 20;
-const FIRST_INPUT_BYTES: usize = 256 << 10;
-const BLOCKS_WAITING_PER_THREAD: usize = 2;
+const READ_BYTES: usize = 128 << 10;
+const SINGLE_READ_BYTES: usize = 64 << 10;
+const CREDITS_PER_THREAD: usize = 12;
+const MOST_CREDITS_PER_BLOCK: usize = 7;
 
 pub(crate) fn to_io(problem: Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, problem)
@@ -76,11 +76,12 @@ pub(crate) struct Joiner<Jobs, B> {
     joining: Joining,
     reading: Option<(Decoded, u64)>,
     spares: Spares,
+    segments: Spares,
     backend: B,
 }
 
 impl<Jobs: Iterator<Item = Job>, B: Backend> Joiner<Jobs, B> {
-    pub(crate) fn new(jobs: Jobs, spares: Spares, backend: B) -> Self {
+    pub(crate) fn new(jobs: Jobs, spares: Spares, segments: Spares, backend: B) -> Self {
         Self {
             jobs,
             returned: VecDeque::new(),
@@ -89,6 +90,7 @@ impl<Jobs: Iterator<Item = Job>, B: Backend> Joiner<Jobs, B> {
             joining: Joining::Open,
             reading: None,
             spares,
+            segments,
             backend,
         }
     }
@@ -170,11 +172,13 @@ impl<Jobs: Iterator<Item = Job>, B: Backend> Joiner<Jobs, B> {
                 Kind::Start => {
                     let (segment, _) = job.into_parts();
                     self.checker.start(&segment.bytes, segment.end_bit())?;
+                    self.segments.give(segment.bytes);
                 }
                 Kind::End => {
                     let (segment, _) = job.into_parts();
                     self.checker
                         .end(&segment.bytes, segment.first_bit, segment.end_bit())?;
+                    self.segments.give(segment.bytes);
                 }
             }
         }
@@ -197,7 +201,11 @@ impl<Jobs: Iterator<Item = Job>, B: Backend> Joiner<Jobs, B> {
             }
         };
         match first_try {
-            Ok(decoded) => return Ok((decoded, segment.end_bit())),
+            Ok(decoded) => {
+                let end_bit = segment.end_bit();
+                self.segments.give(segment.bytes);
+                return Ok((decoded, end_bit));
+            }
             Err(Error::Truncated) => {}
             Err(problem) => return Err(problem),
         }
@@ -242,7 +250,7 @@ impl<Jobs: Iterator<Item = Job>, B: Backend> Joiner<Jobs, B> {
 }
 
 struct Arriving {
-    jobs: Receiver<io::Result<Job>>,
+    jobs: Receiver<io::Result<(Job, usize)>>,
     credits: SyncSender<()>,
     problem: Option<io::Error>,
 }
@@ -255,8 +263,8 @@ impl Iterator for Arriving {
             return None;
         }
         match self.jobs.recv().ok()? {
-            Ok(job) => {
-                if job.kind() == Kind::Block {
+            Ok((job, credits)) => {
+                for _ in 0..credits {
                     let _ = self.credits.try_send(());
                 }
                 Some(job)
@@ -269,41 +277,60 @@ impl Iterator for Arriving {
     }
 }
 
-fn job_for<B: Engine>(segment: Segment, pool: &ThreadPool, spares: &Spares, backend: B) -> Job {
+type Task = (Segment, SyncSender<(Segment, Result<Decoded, Error>)>);
+
+fn job_for(segment: Segment, workers: &Workers<Task>) -> Job {
     if segment.kind != Kind::Block {
         return Job::Waiting(segment);
     }
     let (answer, result) = sync_channel(1);
-    let spares = spares.clone();
-    pool.spawn(move || {
-        let decoded = with_scratch(SCRATCH_WORDS, |scratch| {
-            segment.decode(scratch, &spares, backend)
-        });
-        let _ = answer.send((segment, decoded));
-    });
+    workers.send((segment, answer));
     Job::Decoding(result)
 }
 
 struct Sending<'a> {
-    pool: &'a ThreadPool,
-    spares: &'a Spares,
-    jobs: &'a Sender<io::Result<Job>>,
+    workers: &'a Workers<Task>,
+    jobs: &'a Sender<io::Result<(Job, usize)>>,
     credits: &'a Receiver<()>,
 }
 
-fn send_jobs<B: Engine>(segments: &mut Vec<Segment>, sending: &Sending<'_>, backend: B) -> bool {
+fn credits_per_block(start: &Segment) -> usize {
+    match start.bytes.get(3) {
+        Some(digit @ b'1'..=b'9') => {
+            let level = usize::from(digit - b'0');
+            (CREDITS_PER_THREAD * level / (level + 3)).min(MOST_CREDITS_PER_BLOCK)
+        }
+        _ => 1,
+    }
+}
+
+fn send_jobs(segments: &mut Vec<Segment>, sending: &Sending<'_>, per_block: &mut usize) -> bool {
     segments.drain(..).all(|segment| {
-        if segment.kind == Kind::Block && sending.credits.recv().is_err() {
+        let credits = match segment.kind {
+            Kind::Start => {
+                *per_block = credits_per_block(&segment);
+                0
+            }
+            Kind::Block => *per_block,
+            Kind::End => 0,
+        };
+        if (0..credits).any(|_| sending.credits.recv().is_err()) {
             return false;
         }
-        let job = job_for(segment, sending.pool, sending.spares, backend);
-        sending.jobs.send(Ok(job)).is_ok()
+        let job = job_for(segment, sending.workers);
+        sending.jobs.send(Ok((job, credits))).is_ok()
     })
 }
 
-fn split_into_jobs<B: Engine>(input: &mut impl Read, sending: &Sending<'_>, backend: B) {
+fn split_into_jobs<B: Backend>(
+    input: &mut impl Read,
+    sending: &Sending<'_>,
+    segment_spares: Spares,
+    backend: B,
+) {
     let jobs = sending.jobs;
-    let mut splitter = Splitter::new();
+    let mut per_block = 1;
+    let mut splitter = Splitter::new(segment_spares);
     let mut segments = Vec::new();
     let mut buffer = vec![0u8; READ_BYTES];
     loop {
@@ -316,16 +343,16 @@ fn split_into_jobs<B: Engine>(input: &mut impl Read, sending: &Sending<'_>, back
                 return;
             }
         };
-        if let Err(problem) = splitter.push(&buffer[..read], &mut segments) {
+        if let Err(problem) = splitter.push(backend, &buffer[..read], &mut segments) {
             let _ = jobs.send(Err(to_io(problem)));
             return;
         }
-        if !send_jobs(&mut segments, sending, backend) {
+        if !send_jobs(&mut segments, sending, &mut per_block) {
             return;
         }
     }
     splitter.finish(&mut segments);
-    send_jobs(&mut segments, sending, backend);
+    send_jobs(&mut segments, sending, &mut per_block);
 }
 
 struct Decoding;
@@ -342,24 +369,30 @@ struct StartDecoding<R> {
 impl<R: Read + Send + 'static> Starts<Decoding> for StartDecoding<R> {
     fn start<B: Engine>(self, backend: B) -> Joiner<Arriving, B> {
         let threads = self.threads.max(1);
-        let pool = pool(threads);
+        let spares = Spares::default();
+        let worker_spares = spares.clone();
+        let workers = Workers::new(threads, move |(segment, answer): Task| {
+            let decoded = with_scratch(SCRATCH_WORDS, |scratch| {
+                segment.decode(scratch, &worker_spares, backend)
+            });
+            let _ = answer.send((segment, decoded));
+        });
         let (jobs, arriving) = channel();
-        let blocks_waiting = threads * BLOCKS_WAITING_PER_THREAD;
+        let blocks_waiting = threads * CREDITS_PER_THREAD;
         let (credit, credits) = sync_channel(blocks_waiting);
         for _ in 0..blocks_waiting {
             let _ = credit.try_send(());
         }
         let mut input = self.input;
-        let spares = Spares::default();
-        let reader_spares = spares.clone();
+        let segments = Spares::default();
+        let reader_segments = segments.clone();
         thread::spawn(move || {
             let sending = Sending {
-                pool: &pool,
-                spares: &reader_spares,
+                workers: &workers,
                 jobs: &jobs,
                 credits: &credits,
             };
-            split_into_jobs(&mut input, &sending, backend);
+            split_into_jobs(&mut input, &sending, reader_segments, backend);
         });
         Joiner::new(
             Arriving {
@@ -368,6 +401,7 @@ impl<R: Read + Send + 'static> Starts<Decoding> for StartDecoding<R> {
                 problem: None,
             },
             spares,
+            segments,
             backend,
         )
     }
@@ -457,7 +491,7 @@ impl<R> Starts<Self> for StartReading<R> {
         Reading {
             input: self.0,
             decoder: Decoder::with_backend(
-                vec![0; FIRST_INPUT_BYTES],
+                vec![0; MAX_COMPRESSED_BLOCK_BYTES],
                 vec![0; SCRATCH_WORDS],
                 backend,
             ),
@@ -467,8 +501,8 @@ impl<R> Starts<Self> for StartReading<R> {
 
 /// Decompresses bzip2 data from a reader on the calling thread.
 ///
-/// Its input buffer starts at 256 KB and doubles, up to the largest block bzip2 allows,
-/// only when a block does not fit.
+/// Its input buffer holds the largest block bzip2 allows, and is filled 64 KB at a time,
+/// so memory grows only as far as the largest block read needs.
 pub struct DecoderReader<R> {
     reading: Started<StartReading<R>>,
 }
@@ -497,14 +531,10 @@ impl<R: Read> Read for DecoderReader<R> {
 }
 
 impl<R: Read, B: Backend> Reading<R, B> {
-    fn grow_input(&mut self) -> io::Result<()> {
-        let bigger = (self.decoder.buffer_len() * 2).min(MAX_COMPRESSED_BLOCK_BYTES);
-        self.decoder.grow_buffer(vec![0; bigger]).map_err(to_io)?;
-        Ok(())
-    }
-
     fn read_input(&mut self) -> io::Result<()> {
         let spare = self.decoder.spare_input();
+        let length = spare.len().min(SINGLE_READ_BYTES);
+        let spare = &mut spare[..length];
         let read = loop {
             match self.input.read(spare) {
                 Err(problem) if problem.kind() == io::ErrorKind::Interrupted => {}
@@ -529,11 +559,6 @@ impl<R: Read, B: Backend> Reading<R, B> {
                 Ok(Pulled::Bytes(count)) => return Ok(count),
                 Ok(Pulled::Finished) => return Ok(0),
                 Ok(Pulled::NeedInput) => self.read_input()?,
-                Err(Error::BufferTooSmall)
-                    if self.decoder.buffer_len() < MAX_COMPRESSED_BLOCK_BYTES =>
-                {
-                    self.grow_input()?;
-                }
                 Err(problem) => return Err(to_io(problem)),
             }
         }
@@ -570,10 +595,12 @@ mod tests {
     }
 
     fn segments_of(packed: &[u8]) -> Vec<Segment> {
-        let mut splitter = Splitter::new();
+        let mut splitter = Splitter::new(Spares::default());
         let mut segments = Vec::new();
         for piece in packed.chunks(333) {
-            splitter.push(piece, &mut segments).expect("it splits");
+            splitter
+                .push(pbz2_core::native(), piece, &mut segments)
+                .expect("it splits");
         }
         splitter.finish(&mut segments);
         segments
@@ -581,7 +608,12 @@ mod tests {
 
     fn joined(segments: Vec<Segment>) -> Result<Vec<u8>, Error> {
         let jobs = segments.into_iter().map(Job::Waiting);
-        let mut joiner = Joiner::new(jobs, Spares::default(), pbz2_core::native());
+        let mut joiner = Joiner::new(
+            jobs,
+            Spares::default(),
+            Spares::default(),
+            pbz2_core::native(),
+        );
         let mut out = Vec::new();
         loop {
             joiner.fill()?;

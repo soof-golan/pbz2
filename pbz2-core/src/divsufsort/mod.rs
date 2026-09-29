@@ -16,14 +16,29 @@ const fn ilg(n: P) -> i32 {
     (P::BITS - 1) as i32 - n.leading_zeros() as i32
 }
 
+const ROWS: [u32; ALPHABET] = {
+    let mut rows = [0; ALPHABET];
+    let mut c0 = 0;
+    while c0 < ALPHABET {
+        rows[c0] = (c0 * (2 * ALPHABET - 1 - c0)) as u32;
+        c0 += 1;
+    }
+    rows
+};
+
+#[inline(always)]
+const fn row(c0: usize) -> usize {
+    ROWS[c0 & (ALPHABET - 1)] as usize
+}
+
 #[inline(always)]
 const fn b_index(c0: usize, c1: usize) -> usize {
-    (c1 << 8) | c0
+    row(c0) + c1
 }
 
 #[inline(always)]
 const fn b_star_index(c0: usize, c1: usize) -> usize {
-    (c0 << 8) | c1
+    row(c0) + ALPHABET - 1 - c0 + c1
 }
 
 pub(crate) const fn star_words(length: usize) -> usize {
@@ -34,6 +49,82 @@ pub(crate) const fn work_words(length: usize) -> usize {
     BUCKET_WORDS + star_words(length)
 }
 
+#[inline(always)]
+fn order_pair(first: &mut u64, second: &mut u64) {
+    let (low, high) = ((*first).min(*second), (*first).max(*second));
+    *first = low;
+    *second = high;
+}
+
+#[inline(always)]
+fn sort_words(words: &mut [u64]) {
+    match words {
+        [first, second] => order_pair(first, second),
+        [first, second, third] => {
+            order_pair(first, second);
+            order_pair(second, third);
+            order_pair(first, second);
+        }
+        _ => words.sort_unstable(),
+    }
+}
+
+const SHORT_MOVE: usize = 32;
+
+#[inline(always)]
+fn move_up(sa: &mut [i32], from: usize, to: usize, count: usize) {
+    if count > SHORT_MOVE {
+        sa.copy_within(from..from + count, to);
+        return;
+    }
+    for index in (0..count).rev() {
+        sa[to + index] = sa[from + index];
+    }
+}
+
+const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
+const GATHER_HIGH_BITS: u64 = 0x0102_0408_1020_4080;
+
+#[inline(always)]
+const fn high_bits(word: u64) -> u64 {
+    ((word >> 7) & (HIGH_BITS >> 7)).wrapping_mul(GATHER_HIGH_BITS) >> 56
+}
+
+#[inline(always)]
+fn comparisons(text: &[u8], base: usize) -> (u64, u64) {
+    let (mut less, mut equal) = (0u64, 0u64);
+    if let Some(bytes) = text[base..].first_chunk::<65>() {
+        for eighth in 0..8 {
+            let at = eighth * 8;
+            let here = u64::from_le_bytes(*bytes[at..].first_chunk::<8>().expect("8 bytes"));
+            let after = u64::from_le_bytes(*bytes[at + 1..].first_chunk::<8>().expect("8 bytes"));
+            let differ = here ^ after;
+            let same = !(((differ & !HIGH_BITS) + !HIGH_BITS) | differ) & HIGH_BITS;
+            let low_not_less = (here | HIGH_BITS) - (after & !HIGH_BITS);
+            let below = (!here & after) | (!differ & !low_not_less);
+            less |= high_bits(below & HIGH_BITS) << at;
+            equal |= high_bits(same) << at;
+        }
+    } else {
+        for (bit, pair) in text[base..].windows(2).enumerate() {
+            less |= u64::from(pair[0] < pair[1]) << bit;
+            equal |= u64::from(pair[0] == pair[1]) << bit;
+        }
+    }
+    (less, equal)
+}
+
+#[inline(always)]
+fn types(text: &[u8], base: usize, above_is_b: u64) -> (u64, u64) {
+    let (less, equal) = comparisons(text, base);
+    let starts = less.reverse_bits();
+    let spans = starts | equal.reverse_bits();
+    let reached = starts | (spans & !spans.wrapping_add(starts).wrapping_add(above_is_b));
+    let is_b = reached.reverse_bits();
+    let star = is_b & !((is_b >> 1) | (above_is_b << 63));
+    (is_b, star)
+}
+
 struct Buckets<'a> {
     a: &'a mut [i32; ALPHABET],
     b: &'a mut [i32; ALPHABET * ALPHABET],
@@ -42,68 +133,69 @@ struct Buckets<'a> {
 
 #[inline(never)]
 fn sort_type_b_star(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>) -> P {
+    let sa = &mut sa[..=text.len()];
     let n = text.len() as P;
     let at = |index: P| usize::from(text[index as usize]);
     buckets.a.fill(0);
     buckets.b.fill(0);
 
-    buckets.stars.fill(0);
+    let mut counts = [[0i32; ALPHABET]; 4];
+    let (quads, rest) = text.as_chunks::<4>();
+    for quad in quads {
+        for (lane, byte) in quad.iter().enumerate() {
+            counts[lane][usize::from(*byte)] += 1;
+        }
+    }
+    for byte in rest {
+        counts[0][usize::from(*byte)] += 1;
+    }
+    for (c0, count) in buckets.a.iter_mut().enumerate() {
+        *count = counts.iter().map(|lane| lane[c0]).sum();
+    }
     let mut m = text.len();
-    let mut bytes = text.iter().enumerate().rev();
-    let mut after = bytes.next().map_or(0, |(_, byte)| usize::from(*byte));
-    let mut after_is_b = false;
-    buckets.a[after] += 1;
-    let mut word = 0u32;
-    for (i, here) in bytes {
-        let here = usize::from(*here);
-        if cfg!(target_arch = "aarch64") {
-            let is_b = (here < after) | ((here == after) & after_is_b);
-            let star = is_b & !after_is_b;
-            buckets.a[here] += i32::from(!is_b);
-            let index = if star {
+    let mut above_is_b = 0;
+    for (word, stars) in buckets.stars.chunks_mut(2).enumerate().rev() {
+        let base = word * 64;
+        let (is_b, star) = types(text, base, above_is_b);
+        above_is_b = is_b & 1;
+        let mut bits = is_b;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let here = usize::from(text[base + bit]);
+            let after = usize::from(text[base + bit + 1]);
+            let index = if (star >> bit) & 1 != 0 {
                 b_star_index(here, after)
             } else {
                 b_index(here, after)
             };
-            buckets.b[index] += i32::from(is_b);
-            sa[m - 1] = i as i32;
-            m -= usize::from(star);
-            word |= u32::from(star) << (i & 31);
-            if i & 31 == 0 {
-                buckets.stars[i >> 5] = word;
-                word = 0;
-            }
-            after = here;
-            after_is_b = is_b;
-            continue;
+            buckets.b[index] += 1;
         }
-        let is_b = here < after || (here == after && after_is_b);
-        if !is_b {
-            buckets.a[here] += 1;
-        } else if after_is_b {
-            buckets.b[b_index(here, after)] += 1;
-        } else {
-            buckets.b[b_star_index(here, after)] += 1;
+        let mut bits = star;
+        while bits != 0 {
+            let bit = 63 - bits.leading_zeros() as usize;
+            bits ^= 1 << bit;
             m -= 1;
-            sa[m] = i as i32;
-            buckets.stars[i >> 5] |= 1 << (i & 31);
+            sa[m] = (base + bit) as i32;
         }
-        after = here;
-        after_is_b = is_b;
+        for (half, stars) in stars.iter_mut().enumerate() {
+            *stars = (star >> (half * 32)) as u32;
+        }
     }
     let m = n - m as P;
 
     let mut i: P = 0;
     let mut j: P = 0;
     for c0 in 0..ALPHABET {
-        let t = i + buckets.a[c0] as P;
+        let count = buckets.a[c0] as P;
         buckets.a[c0] = (i + j) as i32;
-        i = t + buckets.b[b_index(c0, c0)] as P;
-        for c1 in c0 + 1..ALPHABET {
-            j += buckets.b[b_star_index(c0, c1)] as P;
-            buckets.b[b_star_index(c0, c1)] = j as i32;
-            i += buckets.b[b_index(c0, c1)] as P;
+        let row_start = j;
+        let stars = &mut buckets.b[b_star_index(c0, c0 + 1)..=b_star_index(c0, ALPHABET - 1)];
+        for star in stars {
+            j += *star as P;
+            *star = j as i32;
         }
+        i += count - (j - row_start);
     }
 
     if 0 < m {
@@ -183,11 +275,8 @@ fn sort_type_b_star(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>) -> P
                 let t = (at_word * 32) as P + P::from(bit as u8);
                 j -= 1;
                 let rank = sa[(isa + j) as usize] as usize;
-                sa[rank] = if t == 0 || at(t - 1) <= at(t) {
-                    t as i32
-                } else {
-                    !(t as i32)
-                };
+                let descends = (t > 0) & (at(t.max(1) - 1) > at(t));
+                sa[rank] = (t as i32) ^ -i32::from(descends);
             }
         }
 
@@ -200,10 +289,12 @@ fn sort_type_b_star(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>) -> P
                 buckets.b[b_index(c0, c1)] = i as i32;
                 i = t;
                 let j = buckets.b[b_star_index(c0, c1)] as P;
-                while j <= k {
-                    sa[i as usize] = sa[k as usize];
-                    i -= 1;
-                    k -= 1;
+                if j <= k {
+                    debug_assert!(i >= k);
+                    let count = k - j + 1;
+                    move_up(sa, j as usize, (i - count + 1) as usize, count as usize);
+                    i -= count;
+                    k = j - 1;
                 }
             }
             buckets.b[b_star_index(c0, c0 + 1)] = (i - buckets.b[b_index(c0, c0)] as P + 1) as i32;
@@ -215,6 +306,7 @@ fn sort_type_b_star(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>) -> P
 
 #[inline(never)]
 fn construct_bwt(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>, m: P, target: P) -> usize {
+    let sa = &mut sa[..=text.len()];
     let n = text.len() as P;
     let at = |index: P| usize::from(text[index as usize]);
     let mut target_row: P = 0;
@@ -232,7 +324,8 @@ fn construct_bwt(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>, m: P, t
                     let s = s - 1;
                     let c0 = at(s);
                     sa[j as usize] = !(c0 as i32);
-                    let placed = if 0 < s && at(s - 1) > c0 { !s } else { s };
+                    let descends = (0 < s) & (at(s.max(1) - 1) > c0);
+                    let placed = s ^ -P::from(descends);
                     let slot = &mut buckets.b[b_index(c0, c1)];
                     let k = *slot;
                     sa[k as usize] = placed as i32;
@@ -266,11 +359,9 @@ fn construct_bwt(text: &[u8], sa: &mut [i32], buckets: &mut Buckets<'_>, m: P, t
             }
             let s = s - 1;
             let c0 = at(s);
-            let placed = if 0 < s && at(s - 1) < c0 {
-                !(at(s - 1) as i32)
-            } else {
-                s as i32
-            };
+            let before = at(s.max(1) - 1);
+            let keep = -i32::from((0 < s) & (before < c0));
+            let placed = (!(before as i32) & keep) | (s as i32 & !keep);
             let slot = &mut buckets.a[c0];
             let k = *slot;
             if s == target {
@@ -379,6 +470,21 @@ mod tests {
         });
         texts.push(fibonacci.1);
         texts
+    }
+
+    #[test]
+    fn sort_words_sorts_every_zero_one_input() {
+        for length in 2..=3 {
+            for bits in 0u32..1 << length {
+                let mut words: Vec<u64> = (0..length).map(|at| u64::from(bits >> at & 1)).collect();
+                let ones = bits.count_ones() as usize;
+                sort_words(&mut words);
+                let expected: Vec<u64> = (0..length)
+                    .map(|at| u64::from(at >= length - ones))
+                    .collect();
+                assert_eq!(words, expected, "length {length}, bits {bits:b}");
+            }
+        }
     }
 
     #[test]

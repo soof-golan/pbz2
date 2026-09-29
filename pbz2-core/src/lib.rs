@@ -46,8 +46,8 @@ mod stream;
 mod tables;
 
 pub use assemble::{
-    BlockSplitter, EncodedBlock, InputBlock, RawBlock, StreamAssembler, encode_block,
-    encode_block_with, encode_raw_block, encode_raw_block_with, encoded_block_bytes,
+    BlockSplitter, EncodedBlock, InputBlock, RawBlock, StreamAssembler, code_runs_with,
+    encode_block, encode_block_with, encode_raw_block, encode_raw_block_with, encoded_block_bytes,
 };
 #[cfg(feature = "simd")]
 pub use backend::Vectorized;

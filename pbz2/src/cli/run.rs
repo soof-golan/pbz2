@@ -7,7 +7,7 @@ use pbz2::{DecoderReader, EncoderWriter, Level, ParallelDecoder, ParallelEncoder
 
 use crate::names;
 
-const BUFFER_BYTES: usize = 1 << 20;
+const BUFFER_BYTES: usize = 128 << 10;
 const STDIN_NAME: &str = "(stdin)";
 const SHORTEST_NAME_COLUMN: usize = 7;
 

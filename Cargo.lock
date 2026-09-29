@@ -488,7 +488,6 @@ dependencies = [
  "md-5",
  "pbz2-core",
  "proc-macro2",
- "rayon",
  "syn 2.0.119",
  "thiserror",
 ]

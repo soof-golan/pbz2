@@ -1,3 +1,4 @@
+use crate::backend::{Backend, Scalar};
 use crate::block::{BLOCK_MAGIC, END_MAGIC};
 
 /// Which bzip2 marker was found.
@@ -62,6 +63,39 @@ const fn marker_pairs() -> [u64; 1024] {
 
 static MARKER_PAIRS: [u64; 1024] = marker_pairs();
 
+const fn pair_nibbles() -> [[u8; 16]; 4] {
+    let mut tables = [[0u8; 16]; 4];
+    let magics = [BLOCK_MAGIC, END_MAGIC];
+    let mut which = 0;
+    while which < magics.len() {
+        let mut offset = 32;
+        while offset <= 39 {
+            let bit = 1u8 << (offset - 32);
+            let first = ((magics[which] >> (72 - offset)) & 0xff) as usize;
+            let second = ((magics[which] >> (64 - offset)) & 0xff) as usize;
+            tables[0][first & 15] |= bit;
+            tables[1][first >> 4] |= bit;
+            tables[2][second & 15] |= bit;
+            tables[3][second >> 4] |= bit;
+            offset += 1;
+        }
+        which += 1;
+    }
+    tables
+}
+
+pub(crate) const PAIR_NIBBLES: [[u8; 16]; 4] = pair_nibbles();
+
+pub(crate) fn exact_marker_pairs(bytes: &[u8]) -> u16 {
+    bytes
+        .windows(2)
+        .take(16)
+        .enumerate()
+        .fold(0, |mask, (at, pair)| {
+            mask | (u16::from(starts_a_marker_pair(pair[0], pair[1])) << at)
+        })
+}
+
 fn window_before(piece: &[u8], end: usize) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&piece[end - 8..end]);
@@ -110,16 +144,18 @@ impl Scanner {
 
     /// Scans the next piece of the data and calls `found` for each marker whose last bit
     /// is in this piece, in order.
-    pub fn scan(&mut self, piece: &[u8], mut found: impl FnMut(Marker)) {
-        self.scan_until(piece, |marker| {
-            found(marker);
-            false
-        });
+    pub fn scan(&mut self, piece: &[u8], found: impl FnMut(Marker)) {
+        self.scan_with(Scalar, piece, found);
     }
 
-    pub(crate) fn first_in(&mut self, piece: &[u8], from_bit: u64) -> Option<Marker> {
+    pub(crate) fn first_in<B: Backend>(
+        &mut self,
+        backend: B,
+        piece: &[u8],
+        from_bit: u64,
+    ) -> Option<Marker> {
         let mut first = None;
-        self.scan_until(piece, |marker| {
+        self.scan_until(backend, piece, |marker| {
             if marker.bit < from_bit {
                 return false;
             }
@@ -129,7 +165,31 @@ impl Scanner {
         first
     }
 
-    fn scan_until(&mut self, piece: &[u8], mut found: impl FnMut(Marker) -> bool) {
+    /// Like [`Scanner::scan`], with the inner loop run by `backend`.
+    pub fn scan_with<B: Backend>(
+        &mut self,
+        backend: B,
+        piece: &[u8],
+        mut found: impl FnMut(Marker),
+    ) {
+        backend.run(
+            #[inline(always)]
+            || {
+                self.scan_until(backend, piece, |marker| {
+                    found(marker);
+                    false
+                });
+            },
+        );
+    }
+
+    #[inline(always)]
+    fn scan_until<B: Backend>(
+        &mut self,
+        backend: B,
+        piece: &[u8],
+        mut found: impl FnMut(Marker) -> bool,
+    ) {
         let whole = piece.len().min(WHOLE_CHECK_BYTES);
         for byte in &piece[..whole] {
             if self.push(*byte, &mut found) {
@@ -141,16 +201,27 @@ impl Scanner {
         }
         let piece_start = self.bytes_seen - whole as u64;
         let pairs = &piece[WHOLE_CHECK_BYTES - PAIR_AHEAD..piece.len() - PAIR_AHEAD + 1];
-        for (at, pair) in pairs.windows(2).enumerate() {
-            if !starts_a_marker_pair(pair[0], pair[1]) {
-                continue;
+        let mut base = 0;
+        while base < pairs.len().saturating_sub(1) {
+            let mask = match pairs[base..].first_chunk::<17>() {
+                Some(chunk) => backend.marker_pairs(chunk),
+                None => exact_marker_pairs(&pairs[base..]),
+            };
+            let mut left = mask;
+            while left != 0 {
+                let at = base + left.trailing_zeros() as usize;
+                left &= left - 1;
+                if !starts_a_marker_pair(pairs[at], pairs[at + 1]) {
+                    continue;
+                }
+                let end = at + WHOLE_CHECK_BYTES;
+                self.window = window_before(piece, end);
+                self.bytes_seen = piece_start + end as u64;
+                if self.push(piece[end], &mut found) {
+                    return;
+                }
             }
-            let end = at + WHOLE_CHECK_BYTES;
-            self.window = window_before(piece, end);
-            self.bytes_seen = piece_start + end as u64;
-            if self.push(piece[end], &mut found) {
-                return;
-            }
+            base += 16;
         }
         self.window = window_before(piece, piece.len());
         self.bytes_seen = piece_start + piece.len() as u64;
@@ -286,7 +357,7 @@ mod tests {
     fn starting_at_offsets_bit_positions() {
         let bytes = magic_at(21, BLOCK_MAGIC);
         let mut scanner = Scanner::starting_at(2);
-        let found = scanner.first_in(&bytes[2..], 0);
+        let found = scanner.first_in(Scalar, &bytes[2..], 0);
         assert_eq!(
             found,
             Some(Marker {

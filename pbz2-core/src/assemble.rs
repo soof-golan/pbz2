@@ -116,7 +116,11 @@ impl BlockSplitter {
 
     /// Like [`BlockSplitter::scan`], with the inner loop run by `backend`.
     pub fn scan_with<B: Backend>(&mut self, backend: B, input: &[u8]) -> (usize, Option<RawBlock>) {
-        let taken = self.builder.push(input, &mut Uncopied, backend);
+        let builder = &mut self.builder;
+        let taken = backend.run(
+            #[inline(always)]
+            || builder.push(input, &mut Uncopied, backend),
+        );
         self.raw += taken;
         let full = self.builder.is_full().then(|| self.take_raw());
         (taken, full)
@@ -143,11 +147,28 @@ impl BlockSplitter {
     /// [`Error::BufferTooSmall`] if `block` is smaller than [`BlockSplitter::block_bytes`],
     /// and [`Error::NotScanned`] if `scanned` is not the raw bytes of the block.
     pub fn fill_scanned(&self, scanned: &[u8], block: &mut [u8]) -> Result<(), Error> {
+        self.fill_scanned_with(Scalar, scanned, block)
+    }
+
+    /// Like [`BlockSplitter::fill_scanned`], with the inner loop run by `backend`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`BlockSplitter::fill_scanned`].
+    pub fn fill_scanned_with<B: Backend>(
+        &self,
+        backend: B,
+        scanned: &[u8],
+        block: &mut [u8],
+    ) -> Result<(), Error> {
         if block.len() < self.block_bytes() {
             return Err(Error::BufferTooSmall);
         }
         let mut builder = BlockBuilder::new(self.builder.limit());
-        let taken = builder.push(scanned, block, Scalar);
+        let taken = backend.run(
+            #[inline(always)]
+            || builder.push(scanned, block, backend),
+        );
         if taken != scanned.len()
             || builder.filled() != self.builder.filled()
             || builder.pending_run() != self.builder.pending_run()
@@ -193,10 +214,28 @@ impl BlockSplitter {
         input: &[u8],
         block: &mut [u8],
     ) -> Result<(usize, Option<InputBlock>), Error> {
+        self.fill_with(Scalar, input, block)
+    }
+
+    /// Like [`BlockSplitter::fill`], with the inner loop run by `backend`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`BlockSplitter::fill`].
+    pub fn fill_with<B: Backend>(
+        &mut self,
+        backend: B,
+        input: &[u8],
+        block: &mut [u8],
+    ) -> Result<(usize, Option<InputBlock>), Error> {
         if block.len() < self.block_bytes() {
             return Err(Error::BufferTooSmall);
         }
-        let taken = self.builder.push(input, block, Scalar);
+        let builder = &mut self.builder;
+        let taken = backend.run(
+            #[inline(always)]
+            || builder.push(input, block, backend),
+        );
         self.raw += taken;
         let full = self.builder.is_full().then(|| self.take());
         Ok((taken, full))
@@ -305,6 +344,24 @@ pub fn encode_raw_block_with<B: Backend>(
     out: &mut [u8],
     backend: B,
 ) -> Result<EncodedBlock, Error> {
+    let filled = code_runs_with(raw, input, block, backend)?;
+    encode_block_with(block, filled, scratch, out, backend)
+}
+
+/// The first step of [`encode_raw_block_with`]: codes the runs of the block's raw bytes
+/// into `block`, which must hold [`RawBlock::length`] bytes. After it, `raw` is no longer
+/// needed, and [`encode_block_with`] compresses `block`.
+///
+/// # Errors
+///
+/// [`Error::NotScanned`] if `raw` does not start with the bytes the splitter scanned for
+/// the block, and [`Error::BufferTooSmall`] if `block` is too small.
+pub fn code_runs_with<B: Backend>(
+    raw: &[u8],
+    input: RawBlock,
+    block: &mut [u8],
+    backend: B,
+) -> Result<InputBlock, Error> {
     let raw = raw.get(..input.raw_length).ok_or(Error::NotScanned)?;
     let block = block.get_mut(..input.length).ok_or(Error::BufferTooSmall)?;
     let mut builder = BlockBuilder::new(input.length);
@@ -314,15 +371,9 @@ pub fn encode_raw_block_with<B: Backend>(
     {
         return Err(Error::NotScanned);
     }
-    encode_block_with(
-        block,
-        InputBlock {
-            length: input.length,
-        },
-        scratch,
-        out,
-        backend,
-    )
+    Ok(InputBlock {
+        length: input.length,
+    })
 }
 
 fn write_code(code: &mut BlockCode, scratch: &[u32], out: &mut [u8]) -> (usize, u32) {

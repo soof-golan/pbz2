@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
 
 use crate::decode::to_io;
 use crate::engine::{Engine, Pipeline, Started, Starts, on_engine, start};
@@ -8,14 +8,15 @@ use crate::pool::{every_core, with_block, with_scratch};
 use crate::workers::Workers;
 use pbz2_core::{
     Backend, BlockSplitter, EncodedBlock, Encoder, Error, InputBlock, Level, Pulled, RawBlock,
-    StreamAssembler, encode_block_with, encode_raw_block_with, encode_scratch_words,
-    encoded_block_bytes,
+    StreamAssembler, code_runs_with, encode_block_with, encode_scratch_words, encoded_block_bytes,
 };
 
 const OUT_BYTES: usize = 1 << 16;
 const BLOCKS_WAITING_PER_THREAD: usize = 2;
+const QUEUED_BYTES: usize = 1 << 20;
 const STREAM_END_BYTES: usize = 16;
 const RAW_BUFFER_BLOCKS: usize = 2;
+const SPARE_INPUTS: usize = 2;
 const SMALLEST_TAIL_BLOCK: u64 = 400_000;
 
 fn finished_already() -> io::Error {
@@ -139,7 +140,6 @@ impl<W: Write> Drop for EncoderWriter<W> {
 }
 
 struct Encoded {
-    input: Vec<u8>,
     output: Vec<u8>,
     result: Result<EncodedBlock, Error>,
 }
@@ -165,25 +165,40 @@ struct Task {
     answer: SyncSender<Encoded>,
 }
 
+enum Returned {
+    Started,
+    Input(Vec<u8>),
+}
+
 fn encode<B: Backend>(
-    mut input: Vec<u8>,
-    mut out: Vec<u8>,
-    job: Job,
+    task: Task,
     scratch_words: usize,
+    give_back: &Sender<Returned>,
     backend: B,
 ) -> Encoded {
+    let Task {
+        mut input,
+        mut out,
+        job,
+        ..
+    } = task;
     let needed = encoded_block_bytes(job.length());
     if out.len() < needed {
-        out.resize(needed, 0);
+        out = vec![0; needed];
     }
     let result = with_scratch(scratch_words, |scratch| match job {
         Job::Raw(raw) => with_block(raw.length(), |block| {
-            encode_raw_block_with(&input, raw, block, scratch, &mut out, backend)
+            let filled = code_runs_with(&input, raw, block, backend);
+            let _ = give_back.send(Returned::Input(input));
+            encode_block_with(block, filled?, scratch, &mut out, backend)
         }),
-        Job::Filled(filled) => encode_block_with(&mut input, filled, scratch, &mut out, backend),
+        Job::Filled(filled) => {
+            let result = encode_block_with(&mut input, filled, scratch, &mut out, backend);
+            let _ = give_back.send(Returned::Input(input));
+            result
+        }
     });
     Encoded {
-        input,
         output: out,
         result,
     }
@@ -199,6 +214,9 @@ struct Running<W, B> {
     spare_inputs: Vec<Vec<u8>>,
     spare_outputs: Vec<Vec<u8>>,
     workers: Workers<Task>,
+    returned: Receiver<Returned>,
+    not_started: usize,
+    most_not_started: usize,
     waiting: VecDeque<Receiver<Encoded>>,
     most_waiting: usize,
     joined: Vec<u8>,
@@ -224,9 +242,11 @@ impl<W> Starts<Self> for StartEncoding<W> {
         let threads = self.threads.max(1);
         let raw_bytes = RAW_BUFFER_BLOCKS * block_bytes;
         let scratch_words = encode_scratch_words(block_bytes);
+        let (give_back, returned) = channel();
         let workers = Workers::new(threads, move |task: Task| {
-            let encoded = encode(task.input, task.out, task.job, scratch_words, backend);
-            let _ = task.answer.send(encoded);
+            let _ = give_back.send(Returned::Started);
+            let answer = task.answer.clone();
+            let _ = answer.send(encode(task, scratch_words, &give_back, backend));
         });
         Running {
             inner: self.inner,
@@ -238,6 +258,9 @@ impl<W> Starts<Self> for StartEncoding<W> {
             spare_inputs: Vec::new(),
             spare_outputs: Vec::new(),
             workers,
+            returned,
+            not_started: 0,
+            most_not_started: (QUEUED_BYTES / block_bytes).min(threads).max(2),
             waiting: VecDeque::new(),
             most_waiting: threads * BLOCKS_WAITING_PER_THREAD,
             joined: vec![0; encoded_block_bytes(block_bytes) + STREAM_END_BYTES],
@@ -249,6 +272,31 @@ impl<W> Starts<Self> for StartEncoding<W> {
 }
 
 impl<W: Write, B: Engine> Running<W, B> {
+    fn take_returned(&mut self, returned: Returned) {
+        match returned {
+            Returned::Started => self.not_started -= 1,
+            Returned::Input(input) => {
+                if self.spare_inputs.len() < SPARE_INPUTS {
+                    self.spare_inputs.push(input);
+                }
+            }
+        }
+    }
+
+    fn wait_for_room(&mut self) -> io::Result<()> {
+        while let Ok(returned) = self.returned.try_recv() {
+            self.take_returned(returned);
+        }
+        while self.not_started >= self.most_not_started {
+            let returned = self
+                .returned
+                .recv()
+                .map_err(|_| io::Error::other("a bzip2 encoder thread stopped"))?;
+            self.take_returned(returned);
+        }
+        Ok(())
+    }
+
     fn spare_input(&mut self) -> Vec<u8> {
         let mut spare = self
             .spare_inputs
@@ -258,7 +306,8 @@ impl<W: Write, B: Engine> Running<W, B> {
         spare
     }
 
-    fn send(&mut self, job: Job) {
+    fn send(&mut self, job: Job) -> io::Result<()> {
+        self.wait_for_room()?;
         let input = match job {
             Job::Raw(_) => {
                 let next = self.spare_input();
@@ -277,8 +326,10 @@ impl<W: Write, B: Engine> Running<W, B> {
             job,
             answer,
         });
+        self.not_started += 1;
         self.waiting.push_back(result);
         self.size_next_block();
+        Ok(())
     }
 
     fn size_next_block(&mut self) {
@@ -298,7 +349,7 @@ impl<W: Write, B: Engine> Running<W, B> {
         let mut block = self.spare_input();
         block.resize(self.splitter.block_bytes(), 0);
         self.splitter
-            .fill_scanned(&self.raw, &mut block)
+            .fill_scanned_with(self.backend, &self.raw, &mut block)
             .map_err(to_io)?;
         self.raw.clear();
         self.filling = Some(block);
@@ -335,7 +386,6 @@ impl<W: Write, B: Engine> Running<W, B> {
                 )
                 .map_err(to_io)?;
             self.inner.write_all(&self.joined[..count])?;
-            self.spare_inputs.push(encoded.input);
             self.spare_outputs.push(encoded.output);
         }
         Ok(())
@@ -344,7 +394,10 @@ impl<W: Write, B: Engine> Running<W, B> {
     fn write(&mut self, mut input: &[u8]) -> io::Result<()> {
         while !input.is_empty() {
             let (taken, full) = if let Some(block) = &mut self.filling {
-                let (taken, full) = self.splitter.fill(input, block).map_err(to_io)?;
+                let (taken, full) = self
+                    .splitter
+                    .fill_with(self.backend, input, block)
+                    .map_err(to_io)?;
                 (taken, full.map(Job::Filled))
             } else if self.raw.len() < self.raw_bytes {
                 let room = self.raw_bytes - self.raw.len();
@@ -362,7 +415,7 @@ impl<W: Write, B: Engine> Running<W, B> {
                 *remaining = remaining.saturating_sub(taken as u64);
             }
             if let Some(full) = full {
-                self.send(full);
+                self.send(full)?;
                 self.write_encoded(false)?;
             }
         }
@@ -376,7 +429,7 @@ impl<W: Write, B: Engine> Running<W, B> {
                 None => self.splitter.finish_scan().map(Job::Raw),
             };
             let Some(last) = last else { break };
-            self.send(last);
+            self.send(last)?;
         }
         self.write_encoded(true)?;
         let count = self.assembler.finish(&mut self.joined).map_err(to_io)?;

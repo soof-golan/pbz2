@@ -29,7 +29,6 @@ bytemuck = { version = "1", default-features = false }
 eyre = "0.6"
 lexopt = "0.3"
 fearless_simd = { version = "1", default-features = false }
-rayon = "1"
 thiserror = { version = "2", default-features = false }
 bzip2 = "0.6"
 criterion = "0.8"

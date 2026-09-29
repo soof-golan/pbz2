@@ -1,7 +1,47 @@
 use super::{P, ilg};
 
 const INSERTION_LIMIT: P = 8;
+const SMALL_PARTITION: P = 256;
 const STACK: usize = 64;
+const RADIX_FROM: usize = 256;
+const MOST_DIGIT_BITS: u32 = 11;
+
+fn sort_by_rank_digits(words: &mut [u64], spare: &mut [u64], lowest: u32, highest: u32) {
+    let span_bits = u32::BITS - (highest - lowest).leading_zeros();
+    let passes = span_bits.div_ceil(MOST_DIGIT_BITS);
+    if passes == 0 {
+        return;
+    }
+    let digit_bits = span_bits.div_ceil(passes);
+    let buckets = 1usize << digit_bits;
+    let mask = buckets as u32 - 1;
+    let mut counts = [0u32; 1 << MOST_DIGIT_BITS];
+    let counts = &mut counts[..buckets];
+    let (mut from, mut to) = (&mut *words, &mut *spare);
+    for pass in 0..passes {
+        let shift = pass * digit_bits;
+        let digit = |word: u64| ((((word >> 32) as u32 - lowest) >> shift) & mask) as usize;
+        counts.fill(0);
+        for word in from.iter() {
+            counts[digit(*word)] += 1;
+        }
+        let mut total = 0;
+        for count in counts.iter_mut() {
+            let here = *count;
+            *count = total;
+            total += here;
+        }
+        for word in from.iter() {
+            let slot = &mut counts[digit(*word)];
+            to[*slot as usize] = *word;
+            *slot += 1;
+        }
+        core::mem::swap(&mut from, &mut to);
+    }
+    if passes % 2 == 1 {
+        words.copy_from_slice(spare);
+    }
+}
 
 struct Budget {
     chance: P,
@@ -29,9 +69,70 @@ impl Budget {
 struct Ranks<'a> {
     sa: &'a mut [i32],
     isa: P,
+    words: &'a mut [u64],
 }
 
 impl Ranks<'_> {
+    fn sort_by_keys(&mut self, isad: P, first: P, last: P, budget: &mut Budget) -> bool {
+        let count = (last - first) as usize;
+        let Some((words, spare)) = self.words.split_at_mut_checked(count) else {
+            return false;
+        };
+        let own = (last - 1) as u32;
+        let (low, ranks) = self.sa.split_at_mut(self.isa as usize);
+        let range = &mut low[first as usize..last as usize];
+        let keys = &ranks[(isad - self.isa) as usize..];
+        let (mut lowest, mut highest) = (u32::MAX, 0);
+        for (word, value) in words.iter_mut().zip(range.iter()) {
+            let key = keys[*value as u32 as usize] as u32;
+            if key == own {
+                return false;
+            }
+            lowest = lowest.min(key);
+            highest = highest.max(key);
+            *word = (u64::from(key) << 32) | u64::from(*value as u32);
+        }
+        match spare.get_mut(..count) {
+            Some(spare) if count >= RADIX_FROM => {
+                sort_by_rank_digits(words, spare, lowest, highest)
+            }
+            _ => super::sort_words(words),
+        }
+        let mut groups = 0;
+        let mut at = 0;
+        while at < count {
+            let key = words[at] >> 32;
+            let end = at
+                + 1
+                + words[at + 1..]
+                    .iter()
+                    .take_while(|word| *word >> 32 == key)
+                    .count();
+            let rank = (first + end as P - 1) as i32;
+            for (value, word) in range[at..end].iter_mut().zip(&words[at..end]) {
+                *value = *word as u32 as i32;
+                ranks[*word as u32 as usize] = rank;
+            }
+            if end - at > 1 {
+                let tandem = u64::from(key == u64::from(rank as u32)) << 63;
+                words[groups] = tandem | ((at as u64) << 32) | end as u64;
+                groups += 1;
+            }
+            at = end;
+        }
+        let step = isad - self.isa;
+        for group in 0..groups {
+            let run = self.words[group];
+            let from = first + ((run >> 32) as u32 & (u32::MAX >> 1)) as P;
+            let to = first + (run as u32) as P;
+            let limit = if run >> 63 == 1 { -1 } else { ilg(to - from) };
+            if budget.check(to - from) {
+                self.introsort(isad + step, from, to, step, limit, budget);
+            }
+        }
+        true
+    }
+
     #[inline(always)]
     fn get(&self, at: P) -> i32 {
         self.sa[at as usize]
@@ -132,7 +233,32 @@ impl Ranks<'_> {
         }
     }
 
+    fn partition_small(&mut self, isad: P, first: P, last: P, v: i32) -> (P, P) {
+        let (start, end) = (first as usize, last as usize);
+        let same = self.sa[start..end]
+            .iter()
+            .take_while(|value| self.rank_at(isad, **value) == v)
+            .count();
+        let (mut less, mut equal) = (start, start + same);
+        for at in start + same..end {
+            let value = self.sa[at];
+            let key = self.rank_at(isad, value);
+            self.sa[at] = self.sa[equal];
+            self.sa[equal] = value;
+            let (at_less, at_equal) = (self.sa[less], self.sa[equal]);
+            let smaller = -i32::from(key < v);
+            self.sa[less] = (at_equal & smaller) | (at_less & !smaller);
+            self.sa[equal] = (at_less & smaller) | (at_equal & !smaller);
+            less += usize::from(key < v);
+            equal += usize::from(key <= v);
+        }
+        (less as P, equal as P)
+    }
+
     fn partition(&mut self, isad: P, mut first: P, middle: P, mut last: P, v: i32) -> (P, P) {
+        if last - first <= SMALL_PARTITION {
+            return self.partition_small(isad, first, last, v);
+        }
         let mut x = 0;
         let mut b = middle - 1;
         loop {
@@ -322,13 +448,19 @@ impl Ranks<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn introsort(&mut self, mut isad: P, mut first: P, mut last: P, budget: &mut Budget) {
+    fn introsort(
+        &mut self,
+        mut isad: P,
+        mut first: P,
+        mut last: P,
+        step: P,
+        mut limit: i32,
+        budget: &mut Budget,
+    ) {
         let isa = self.isa;
-        let step = isad - isa;
         let mut stack = [(0 as P, 0 as P, 0 as P, 0i32, 0 as P); STACK];
         let mut size = 0usize;
         let mut link: P = -1;
-        let mut limit = ilg(last - first);
         macro_rules! push {
             ($a:expr, $b:expr, $c:expr, $d:expr, $e:expr) => {{
                 stack[size] = ($a, $b, $c, $d, $e);
@@ -602,7 +734,9 @@ impl Ranks<'_> {
 
 #[inline(never)]
 pub(super) fn trsort(sa: &mut [i32], isa: P, n: P, depth: P) {
-    let mut ranks = Ranks { sa, isa };
+    let (sa, free) = sa.split_at_mut((isa + n) as usize);
+    let (_, words, _) = bytemuck::pod_align_to_mut::<i32, u64>(free);
+    let mut ranks = Ranks { sa, isa, words };
     let mut budget = Budget {
         chance: ilg(n) as P * 2 / 3,
         remain: n,
@@ -627,7 +761,10 @@ pub(super) fn trsort(sa: &mut [i32], isa: P, n: P, depth: P) {
                 let last = ranks.rank_at(isa, t as i32) as P + 1;
                 if 1 < last - first {
                     budget.count = 0;
-                    ranks.introsort(isad, first, last, &mut budget);
+                    if !ranks.sort_by_keys(isad, first, last, &mut budget) {
+                        let limit = ilg(last - first);
+                        ranks.introsort(isad, first, last, isad - isa, limit, &mut budget);
+                    }
                     if budget.count == 0 {
                         skip = first - last;
                     } else {

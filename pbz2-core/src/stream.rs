@@ -327,8 +327,18 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
     fn next_marker(&self, from: u64) -> Option<u64> {
         let first_byte = (from - self.buffer_bit) >> 3;
         let bytes = &self.buffer.as_ref()[first_byte as usize..self.filled];
-        Scanner::starting_at(first_byte)
-            .first_in(bytes, from - self.buffer_bit)
+        let backend = self.backend;
+        backend
+            .run(
+                #[inline(always)]
+                || {
+                    Scanner::starting_at(first_byte).first_in(
+                        backend,
+                        bytes,
+                        from - self.buffer_bit,
+                    )
+                },
+            )
             .map(|marker| {
                 debug_assert!(matches!(marker.kind, MarkerKind::Block | MarkerKind::End));
                 marker.bit + self.buffer_bit

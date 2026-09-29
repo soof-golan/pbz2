@@ -24,19 +24,31 @@ const EXPANDED_BYTES: usize = 2 << 20;
 const SMALLEST_BYTES: usize = 64 << 10;
 const MOST_SPARES: usize = 64;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Spares(Arc<Mutex<Vec<Vec<u8>>>>);
 
 impl Spares {
+    fn pop(&self) -> Option<Vec<u8>> {
+        self.0.lock().ok().and_then(|mut spares| spares.pop())
+    }
+
     fn take(&self, length: usize) -> Vec<u8> {
-        let spare = self.0.lock().ok().and_then(|mut spares| spares.pop());
-        match spare {
+        match self.pop() {
             Some(mut bytes) => {
-                bytes.resize(length, 0);
+                if bytes.len() < length {
+                    bytes.resize(length, 0);
+                }
                 bytes
             }
             None => vec![0; length],
         }
+    }
+
+    pub(crate) fn copy_of(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut copy = self.pop().unwrap_or_default();
+        copy.clear();
+        copy.extend_from_slice(bytes);
+        copy
     }
 
     pub(crate) fn give(&self, bytes: Vec<u8>) {
@@ -101,13 +113,7 @@ impl Segment {
         let first = (expected + (expected >> 3)).clamp(SMALLEST_BYTES, EXPANDED_BYTES);
         let mut bytes = spares.take(first);
         let mut end = 0;
-        while !output.is_finished() {
-            if end == bytes.len() {
-                if end == EXPANDED_BYTES {
-                    break;
-                }
-                bytes.resize(EXPANDED_BYTES, 0);
-            }
+        while !output.is_finished() && end < bytes.len() {
             end += output.read(scratch, &mut bytes[end..]);
         }
         let mut rest = Vec::new();
@@ -157,23 +163,30 @@ pub(crate) struct Splitter {
     pending_bit: u64,
     current: (Kind, u64),
     markers: Vec<(Kind, u64)>,
+    spares: Spares,
 }
 
 impl Splitter {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn new(spares: Spares) -> Self {
         Self {
             scanner: Scanner::new(),
             pending: Vec::new(),
             pending_bit: 0,
             current: (Kind::Start, 0),
             markers: Vec::new(),
+            spares,
         }
     }
 
-    pub(crate) fn push(&mut self, piece: &[u8], out: &mut Vec<Segment>) -> Result<(), Error> {
+    pub(crate) fn push<B: Backend>(
+        &mut self,
+        backend: B,
+        piece: &[u8],
+        out: &mut Vec<Segment>,
+    ) -> Result<(), Error> {
         self.pending.extend_from_slice(piece);
         let mut markers = std::mem::take(&mut self.markers);
-        self.scanner.scan(piece, |marker| {
+        self.scanner.scan_with(backend, piece, |marker| {
             let kind = match marker.kind {
                 MarkerKind::Block => Kind::Block,
                 MarkerKind::End => Kind::End,
@@ -203,8 +216,9 @@ impl Splitter {
         let first_byte = (from - self.pending_bit) >> 3;
         let segment = Segment {
             kind,
-            bytes: self.pending[first_byte as usize..((bit - self.pending_bit + 7) >> 3) as usize]
-                .to_vec(),
+            bytes: self.spares.copy_of(
+                &self.pending[first_byte as usize..((bit - self.pending_bit + 7) >> 3) as usize],
+            ),
             first_bit: (from - self.pending_bit) & 7,
             bit_length: bit - from,
         };
