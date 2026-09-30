@@ -63,6 +63,7 @@ const fn marker_pairs() -> [u64; 1024] {
 
 static MARKER_PAIRS: [u64; 1024] = marker_pairs();
 
+#[cfg(feature = "simd")]
 const fn pair_nibbles() -> [[u8; 16]; 4] {
     let mut tables = [[0u8; 16]; 4];
     let magics = [BLOCK_MAGIC, END_MAGIC];
@@ -84,6 +85,7 @@ const fn pair_nibbles() -> [[u8; 16]; 4] {
     tables
 }
 
+#[cfg(feature = "simd")]
 pub(crate) const PAIR_NIBBLES: [[u8; 16]; 4] = pair_nibbles();
 
 pub(crate) fn exact_marker_pairs(bytes: &[u8]) -> u16 {

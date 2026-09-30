@@ -341,6 +341,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "simd")]
     fn assert_marker_pairs_cover_exact<B: Backend>(backend: B) {
         for first in 0..=255u8 {
             for second in 0..=255u8 {
