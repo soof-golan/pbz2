@@ -3,7 +3,7 @@ members = ["pbz2", "pbz2-core"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Soof Golan"]
@@ -24,7 +24,7 @@ panic = "abort"
 strip = true
 
 [workspace.dependencies]
-pbz2-core = { path = "pbz2-core", version = "0.1.0" }
+pbz2-core = { path = "pbz2-core", version = "0.1.1" }
 bytemuck = { version = "1", default-features = false }
 eyre = "0.6"
 lexopt = "0.3"
