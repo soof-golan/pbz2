@@ -3,8 +3,8 @@
 use std::io::{Cursor, Read, Write};
 
 use pbz2::pbz2_core::{
-    Backend, Decoder, ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS, Encoder, Error,
-    MAX_COMPRESSED_BLOCK_BYTES, Pulled, SCRATCH_WORDS, Scalar, native,
+    Backend, Decoder, Encoder, Error, MAX_COMPRESSED_BLOCK_BYTES, Pulled, Scalar,
+    decode_scratch_words, encode_scratch_words, native,
 };
 use pbz2::{DecoderReader, EncoderWriter, Level, ParallelDecoder, ParallelEncoder};
 
@@ -62,8 +62,8 @@ pub fn encoded_in_pieces<B: Backend>(
 ) -> Vec<u8> {
     let mut encoder = Encoder::with_backend(
         level,
-        vec![0u8; ENCODE_BUFFER_BYTES],
-        vec![0u32; ENCODE_SCRATCH_WORDS],
+        vec![0u8; level.block_bytes()],
+        vec![0u32; encode_scratch_words(level)],
         backend,
     )
     .expect("the buffers are big enough");
@@ -142,7 +142,7 @@ pub fn sequential_in_pieces<B: Backend>(
 ) -> Result<Vec<u8>, Error> {
     let mut decoder = Decoder::with_backend(
         vec![0u8; MAX_COMPRESSED_BLOCK_BYTES],
-        vec![0u32; SCRATCH_WORDS],
+        vec![0u32; decode_scratch_words(Level::BEST)],
         backend,
     );
     let mut pieces = input.chunks(piece_bytes.max(1));

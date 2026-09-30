@@ -1,9 +1,7 @@
 use crate::Error;
 use crate::backend::Backend;
 use crate::bits::BitReader;
-use crate::block::{
-    BLOCK_MAGIC, BlockOutput, END_MAGIC, decode_block_into_with, decode_scratch_words,
-};
+use crate::block::{BLOCK_MAGIC, BlockOutput, END_MAGIC, decode_block_into, decode_scratch_words};
 use crate::crc;
 use crate::level::Level;
 use crate::native::{Native, native};
@@ -23,9 +21,7 @@ pub enum Pulled {
     Bytes(usize),
     /// More input is needed before anything more can be written.
     NeedInput,
-    /// All output has been written. When decoding, bytes after the last stream that are
-    /// not another stream are ignored, as the bzip2 tool does;
-    /// [`Decoder::has_trailing_bytes`] tells whether there were any.
+    /// All output has been written.
     Finished,
 }
 
@@ -43,18 +39,10 @@ enum State {
     Finished,
 }
 
-/// A sequential bzip2 decoder that does no I/O and does not allocate.
+/// A sequential bzip2 decoder: push compressed bytes, pull decompressed bytes.
 ///
-/// Push compressed bytes in with [`Decoder::push`], pull decompressed bytes out with
-/// [`Decoder::pull`], and call [`Decoder::end_input`] once all input has been pushed.
-///
-/// The caller provides the storage: an input buffer of at least
-/// [`MAX_COMPRESSED_BLOCK_BYTES`] bytes (smaller works for most files) and a scratch space
-/// of [`crate::SCRATCH_WORDS`] words (or [`crate::decode_scratch_words`] if the level is
-/// known).
-/// Both can be borrowed slices or owned vectors.
-///
-/// The inner loops run in the [`Native`] backend.
+/// It needs an input buffer of [`MAX_COMPRESSED_BLOCK_BYTES`] and a scratch space of
+/// [`crate::decode_scratch_words`] for [`Level::BEST`].
 pub struct Decoder<Buffer, Scratch, B = Native> {
     buffer: Buffer,
     scratch: Scratch,
@@ -73,7 +61,7 @@ pub struct Decoder<Buffer, Scratch, B = Native> {
 impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>>
     Decoder<Buffer, Scratch, Native>
 {
-    /// A decoder that uses `buffer` for input and `scratch` to decode blocks.
+    /// A decoder that runs in the [`Native`] backend.
     pub fn new(buffer: Buffer, scratch: Scratch) -> Self {
         Self::with_backend(buffer, scratch, native())
     }
@@ -82,7 +70,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>>
 impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B: Backend>
     Decoder<Buffer, Scratch, B>
 {
-    /// Like [`Decoder::new`], with the inner loops run by `backend`.
+    /// A decoder that runs in `backend`.
     pub const fn with_backend(buffer: Buffer, scratch: Scratch, backend: B) -> Self {
         Self {
             buffer,
@@ -100,8 +88,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         }
     }
 
-    /// Copies as much of `input` as fits into the input buffer and returns how many bytes
-    /// were taken.
+    /// Copies as much of `input` as fits and returns how many bytes were taken.
     pub fn push(&mut self, input: &[u8]) -> usize {
         self.drop_consumed_input();
         let buffer = self.buffer.as_mut();
@@ -111,8 +98,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         taken
     }
 
-    /// The free end of the input buffer, to read input into directly instead of calling
-    /// [`Decoder::push`]. Call [`Decoder::commit_input`] with how many bytes were written.
+    /// The free end of the input buffer, to read into instead of calling [`Decoder::push`].
     pub fn spare_input(&mut self) -> &mut [u8] {
         self.drop_consumed_input();
         &mut self.buffer.as_mut()[self.filled..]
@@ -123,28 +109,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         self.filled = (self.filled + count).min(self.buffer.as_ref().len());
     }
 
-    /// Moves the input pushed so far into `bigger` and returns the old buffer. Use it after
-    /// [`Error::BufferTooSmall`], then pull again.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::BufferTooSmall`] if `bigger` cannot hold the input pushed so far; the
-    /// decoder keeps its old buffer.
-    pub fn grow_buffer(&mut self, mut bigger: Buffer) -> Result<Buffer, Error> {
-        self.drop_consumed_input();
-        let Some(room) = bigger.as_mut().get_mut(..self.filled) else {
-            return Err(Error::BufferTooSmall);
-        };
-        room.copy_from_slice(&self.buffer.as_ref()[..self.filled]);
-        Ok(core::mem::replace(&mut self.buffer, bigger))
-    }
-
-    /// The size of the input buffer.
-    pub fn buffer_len(&self) -> usize {
-        self.buffer.as_ref().len()
-    }
-
-    /// Tells the decoder that all input has been pushed.
+    /// Says that all input has been pushed.
     pub const fn end_input(&mut self) {
         self.input_ended = true;
     }
@@ -153,8 +118,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
     ///
     /// # Errors
     ///
-    /// Any [`Error`] from damaged or incomplete data, and [`Error::BufferTooSmall`] if a
-    /// block does not fit in the input buffer.
+    /// Damaged or incomplete data, or [`Error::BufferTooSmall`] if a block does not fit.
     pub fn pull(&mut self, out: &mut [u8]) -> Result<Pulled, Error> {
         loop {
             match &mut self.state {
@@ -183,8 +147,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         }
     }
 
-    /// Whether decoding finished with bytes after the last stream that are not another
-    /// stream. They are ignored, and the bzip2 tool warns about them.
+    /// Whether ignored bytes followed the last stream.
     #[must_use]
     pub fn has_trailing_bytes(&self) -> bool {
         matches!(self.state, State::Finished) && self.available_end() > self.position
@@ -302,13 +265,13 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
             }
         }
         let bytes = &self.buffer.as_ref()[..self.filled];
-        match decode_block_into_with(
+        match decode_block_into(
+            self.backend,
             bytes,
             start - self.buffer_bit,
             end - self.buffer_bit,
             level,
             self.scratch.as_mut(),
-            self.backend,
         ) {
             Ok(output) => {
                 self.tried_to = 0;

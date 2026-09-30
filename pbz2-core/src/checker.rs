@@ -16,24 +16,11 @@ enum State {
     Finished,
 }
 
-/// Checks bzip2 data in order when its blocks are decoded out of order, for example on
-/// several threads.
+/// Checks, in order, the pieces between markers of data whose blocks were decoded out of
+/// order at [`Level::BEST`]. Bit positions count from the start of the data.
 ///
-/// Find the markers with [`crate::Scanner`], then hand the checker each piece between one
-/// marker and the next, in order: [`StreamChecker::start`] for the bits before the first
-/// marker, [`StreamChecker::block`] for each block decoded with
-/// [`crate::decode_block_into`] once all its bytes have been read, and
-/// [`StreamChecker::end`] for each end-of-stream marker. Decode every block at
-/// [`Level::BEST`]; the checker makes sure each fits its stream's level.
-///
-/// The 48-bit marker can also occur inside compressed data. Decoding a block up to such
-/// a false marker returns [`Error::Truncated`]; decode it again with the next pieces
-/// added, taking at least twice as many bits on each try, so any number of false
-/// markers costs at most two decodes. The block ends at [`BlockOutput::end_bit`], and the
-/// pieces after that are the next to check.
-///
-/// All bit positions count from the start of the data, so the bytes given to each call
-/// must start there too.
+/// A block cut short by a false marker decodes as [`Error::Truncated`]; decode it again
+/// with the next pieces added, and go on from its [`BlockOutput::end_bit`].
 #[derive(Debug, Clone)]
 pub struct StreamChecker {
     state: State,
@@ -54,17 +41,13 @@ impl StreamChecker {
         }
     }
 
-    /// Whether the last stream has ended and bytes that are not another stream were found
-    /// after it. They are ignored, as the bzip2 tool does, so there is no need to decode or
-    /// check them.
+    /// Whether ignored bytes followed the last stream, so the rest need no checking.
     #[must_use]
     pub const fn is_finished(&self) -> bool {
         matches!(self.state, State::Finished)
     }
 
-    /// Whether a stream is open, so the next piece is a block or an end-of-stream marker.
-    /// When it is not, a block marker found next is a false marker in the bytes after the
-    /// last stream, and [`StreamChecker::block`] ends the data without checking the block.
+    /// Whether a stream is open. If not, the next block marker is in ignored bytes.
     #[must_use]
     pub const fn is_in_stream(&self) -> bool {
         matches!(self.state, State::InStream { .. })
@@ -89,25 +72,20 @@ impl StreamChecker {
         }
     }
 
-    /// Checks the bits before the first marker at `end_bit` (or all the data if there is
-    /// no marker), which must be the first stream's header.
+    /// Checks the stream header before the first marker, at `end_bit`.
     ///
     /// # Errors
     ///
-    /// [`Error::NotBzip2`] if there is no header, and [`Error::BadBlockMagic`] if
-    /// no marker comes right after it.
+    /// [`Error::NotBzip2`] or [`Error::BadBlockMagic`].
     pub fn start(&mut self, bytes: &[u8], end_bit: u64) -> Result<(), Error> {
         self.start_stream(bytes, 0, end_bit)
     }
 
-    /// Checks a decoded block once all its bytes have been read. `end_bit` is where the
-    /// next marker (or the end of the data) is.
+    /// Checks a block whose bytes have all been read and whose piece ends at `end_bit`.
     ///
     /// # Errors
     ///
-    /// [`Error::BadBlockMagic`] if the block does not end at `end_bit`,
-    /// [`Error::BlockTooLarge`] if it does not fit its stream's level, the errors of
-    /// [`BlockOutput::finish`], and [`Error::NotBzip2`] before the first stream's header.
+    /// Damaged data, a block too large for its stream, or [`Error::NotBzip2`].
     pub fn block(&mut self, output: &BlockOutput, end_bit: u64) -> Result<(), Error> {
         let State::InStream { level, crc } = self.state else {
             return self.outside_a_stream();
@@ -125,15 +103,12 @@ impl StreamChecker {
         Ok(())
     }
 
-    /// Checks the end-of-stream marker at `start_bit` and the bits after it up to
-    /// `end_bit`, the next marker or the end of the data: the stream's checksum, and the
-    /// next stream's header if there is one.
+    /// Checks the end-of-stream piece from `start_bit` to `end_bit`, and the next stream's
+    /// header if there is one.
     ///
     /// # Errors
     ///
-    /// [`Error::StreamCrcMismatch`] if the checksum does not match,
-    /// [`Error::BadBlockMagic`] or [`Error::Truncated`] for damaged data, and
-    /// [`Error::NotBzip2`] before the first stream's header.
+    /// Damaged data, [`Error::StreamCrcMismatch`], or [`Error::NotBzip2`].
     pub fn end(&mut self, bytes: &[u8], start_bit: u64, end_bit: u64) -> Result<(), Error> {
         let State::InStream { crc, .. } = self.state else {
             return self.outside_a_stream();
@@ -161,13 +136,11 @@ impl StreamChecker {
         Ok(())
     }
 
-    /// Checks that the data did not stop in the middle of a stream. Call it after the
-    /// last piece.
+    /// Checks that the data did not stop inside a stream.
     ///
     /// # Errors
     ///
-    /// [`Error::Truncated`] if a stream is not finished, and [`Error::NotBzip2`] if there
-    /// was no stream.
+    /// [`Error::Truncated`] or [`Error::NotBzip2`].
     pub const fn finish(&self) -> Result<(), Error> {
         match self.state {
             State::InStream { .. } => Err(Error::Truncated),

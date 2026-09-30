@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 
 use libfuzzer_sys::fuzz_target;
 use pbz2::pbz2_core::{
-    Backend, ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS, Encoder, Level, Pulled, Scalar, native,
+    Backend, Encoder, Level, Pulled, Scalar, encode_scratch_words, native,
 };
 use pbz2::{ParallelEncoder, decompress};
 
@@ -75,8 +75,8 @@ fn encoded<B: Backend>(
 ) -> Vec<u8> {
     let mut encoder = Encoder::with_backend(
         level,
-        vec![0u8; ENCODE_BUFFER_BYTES],
-        vec![0u32; ENCODE_SCRATCH_WORDS],
+        vec![0u8; level.block_bytes()],
+        vec![0u32; encode_scratch_words(level)],
         backend,
     )
     .unwrap();

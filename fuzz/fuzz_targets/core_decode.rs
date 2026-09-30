@@ -2,19 +2,19 @@
 
 use libfuzzer_sys::fuzz_target;
 use pbz2::pbz2_core::{
-    Backend, Error, Level, SCRATCH_WORDS, Scalar, decode_block_into_with, native,
+    Backend, Error, Level, Scalar, decode_block_into, decode_scratch_words, native,
 };
 
 fn decoded<B: Backend>(bytes: &[u8], start_bit: u64, backend: B) -> Result<(Vec<u8>, u32), Error> {
-    let mut scratch = vec![0u32; SCRATCH_WORDS];
+    let mut scratch = vec![0u32; decode_scratch_words(Level::BEST)];
     let end_bit = bytes.len() as u64 * 8;
-    let mut output = decode_block_into_with(
+    let mut output = decode_block_into(
+        backend,
         bytes,
         start_bit,
         end_bit,
         Level::BEST,
         &mut scratch,
-        backend,
     )?;
     let mut out = Vec::new();
     let mut piece = [0u8; 4096];

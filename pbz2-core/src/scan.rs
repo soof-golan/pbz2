@@ -1,4 +1,4 @@
-use crate::backend::{Backend, Scalar};
+use crate::backend::Backend;
 use crate::block::{BLOCK_MAGIC, END_MAGIC};
 
 /// Which bzip2 marker was found.
@@ -10,16 +10,13 @@ pub enum MarkerKind {
     End,
 }
 
-/// A 48-bit marker found in the data, at a bit position counted from the first byte
-/// ever given to the [`Scanner`].
-///
-/// The same 48 bits can also occur inside compressed data, so a marker is a place where
-/// a block may start, not proof that one does.
+/// A marker at a bit position from the start of the data. It may be a false marker inside
+/// compressed data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Marker {
     /// Which marker it is.
     pub kind: MarkerKind,
-    /// The bit where the marker's first bit is.
+    /// The marker's first bit.
     pub bit: u64,
 }
 
@@ -110,9 +107,7 @@ fn starts_a_marker_pair(first: u8, second: u8) -> bool {
     MARKER_PAIRS[pair >> 6] >> (pair & 63) & 1 != 0
 }
 
-/// Finds block and end-of-stream markers in data that arrives in pieces of any size.
-///
-/// It keeps only a few bytes of state and never buffers the data.
+/// Finds block and end-of-stream markers in data that arrives in pieces.
 #[derive(Debug, Clone, Default)]
 pub struct Scanner {
     window: u64,
@@ -127,27 +122,12 @@ impl Scanner {
         Self::starting_at(0)
     }
 
-    /// A scanner whose first byte is byte `first_byte` of the data. Markers that would
-    /// start before that byte are not reported.
-    #[must_use]
-    pub const fn starting_at(first_byte: u64) -> Self {
+    pub(crate) const fn starting_at(first_byte: u64) -> Self {
         Self {
             window: 0,
             bytes_seen: first_byte,
             first_byte,
         }
-    }
-
-    /// How many bytes have been scanned, counting from the start of the data.
-    #[must_use]
-    pub const fn bytes_seen(&self) -> u64 {
-        self.bytes_seen
-    }
-
-    /// Scans the next piece of the data and calls `found` for each marker whose last bit
-    /// is in this piece, in order.
-    pub fn scan(&mut self, piece: &[u8], found: impl FnMut(Marker)) {
-        self.scan_with(Scalar, piece, found);
     }
 
     pub(crate) fn first_in<B: Backend>(
@@ -167,13 +147,8 @@ impl Scanner {
         first
     }
 
-    /// Like [`Scanner::scan`], with the inner loop run by `backend`.
-    pub fn scan_with<B: Backend>(
-        &mut self,
-        backend: B,
-        piece: &[u8],
-        mut found: impl FnMut(Marker),
-    ) {
+    /// Scans the next piece and calls `found` for each marker that ends in it, in order.
+    pub fn scan<B: Backend>(&mut self, backend: B, piece: &[u8], mut found: impl FnMut(Marker)) {
         backend.run(
             #[inline(always)]
             || {
@@ -262,6 +237,7 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Scalar;
 
     fn magic_at(bit: u32, magic: u64) -> [u8; 16] {
         let value = u128::from(magic) << (128 - 48 - bit);
@@ -278,7 +254,7 @@ mod tests {
                 let mut count = 0;
                 let (first, second) = bytes.split_at(split);
                 for piece in [first, second] {
-                    scanner.scan(piece, |marker| {
+                    scanner.scan(Scalar, piece, |marker| {
                         found[count] = Some(marker);
                         count += 1;
                     });
@@ -325,7 +301,7 @@ mod tests {
                 let mut found = [None; 3];
                 let mut count = 0;
                 for piece in bytes.chunks(piece_bytes) {
-                    scanner.scan(piece, |marker| {
+                    scanner.scan(Scalar, piece, |marker| {
                         found[count.min(2)] = Some(marker);
                         count += 1;
                     });
@@ -336,7 +312,7 @@ mod tests {
                     expected.map(Some),
                     "bit {bit}, pieces of {piece_bytes}"
                 );
-                assert_eq!(scanner.bytes_seen(), 400);
+                assert_eq!(scanner.bytes_seen, 400);
             }
         }
     }
@@ -345,7 +321,9 @@ mod tests {
     fn distinguishes_end_and_block_markers() {
         let mut scanner = Scanner::new();
         let mut kinds = [None; 1];
-        scanner.scan(&magic_at(13, END_MAGIC), |marker| kinds[0] = Some(marker));
+        scanner.scan(Scalar, &magic_at(13, END_MAGIC), |marker| {
+            kinds[0] = Some(marker);
+        });
         assert_eq!(
             kinds[0],
             Some(Marker {

@@ -1,7 +1,8 @@
 mod common;
 
 use common::{assert_decode_fails, assert_decodes_to, decoded_by_bzip2, sequential_in_pieces};
-use pbz2::pbz2_core::{Decoder, Pulled, SCRATCH_WORDS};
+use pbz2::Level;
+use pbz2::pbz2_core::{Decoder, Pulled, decode_scratch_words};
 
 const SAMPLE1_BZ2: &[u8] = include_bytes!("../../testdata/sample1.bz2");
 const SAMPLE1_REF: &[u8] = include_bytes!("../../testdata/sample1.ref");
@@ -66,7 +67,10 @@ fn decompress_hello_world() {
 
 #[test]
 fn pull_with_empty_output_returns_zero() {
-    let mut decoder = Decoder::new(vec![0u8; 1024], vec![0u32; SCRATCH_WORDS]);
+    let mut decoder = Decoder::new(
+        vec![0u8; 1024],
+        vec![0u32; decode_scratch_words(Level::BEST)],
+    );
     assert_eq!(decoder.push(HELLO_WORLD), HELLO_WORLD.len());
     decoder.end_input();
     let mut nothing = [0u8; 0];

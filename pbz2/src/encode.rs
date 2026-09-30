@@ -8,7 +8,7 @@ use crate::pool::{every_core, with_block, with_scratch};
 use crate::workers::Workers;
 use pbz2_core::{
     Backend, BlockSplitter, EncodedBlock, Encoder, Error, InputBlock, Level, Pulled, RawBlock,
-    StreamAssembler, code_runs_with, encode_block_with, encode_scratch_words, encoded_block_bytes,
+    StreamAssembler, code_runs, encode_block, encode_scratch_words, encoded_block_bytes,
 };
 
 const OUT_BYTES: usize = 1 << 16;
@@ -40,11 +40,10 @@ impl<W> Pipeline for StartWriting<W> {
 
 impl<W> Starts<Self> for StartWriting<W> {
     fn start<B: Engine>(self, backend: B) -> Writing<W, B> {
-        let block = self.level.block_bytes();
         let encoder = Encoder::with_backend(
             self.level,
-            vec![0; block],
-            vec![0; encode_scratch_words(block)],
+            vec![0; self.level.block_bytes()],
+            vec![0; encode_scratch_words(self.level)],
             backend,
         )
         .expect("the buffers are sized for the level");
@@ -87,13 +86,8 @@ impl<W: Write, B: Backend> Writing<W, B> {
     }
 }
 
-/// Compresses data written to it on the calling thread and writes the bzip2 stream to
-/// another writer.
-///
-/// Call [`EncoderWriter::finish`] to end the stream and get the writer back. Dropping it
-/// also ends the stream, but ignores errors. `flush` only flushes the inner writer: bytes
-/// written since the last full block stay in the encoder until the block fills up or the
-/// stream ends.
+/// Compresses data written to it on the calling thread into another writer. Dropping it
+/// ends the stream but ignores errors.
 pub struct EncoderWriter<W: Write> {
     writing: Option<Started<StartWriting<W>>>,
 }
@@ -188,12 +182,12 @@ fn encode<B: Backend>(
     }
     let result = with_scratch(scratch_words, |scratch| match job {
         Job::Raw(raw) => with_block(raw.length(), |block| {
-            let filled = code_runs_with(&input, raw, block, backend);
+            let filled = code_runs(backend, &input, raw, block);
             let _ = give_back.send(Returned::Input(input));
-            encode_block_with(block, filled?, scratch, &mut out, backend)
+            encode_block(backend, block, filled?, scratch, &mut out)
         }),
         Job::Filled(filled) => {
-            let result = encode_block_with(&mut input, filled, scratch, &mut out, backend);
+            let result = encode_block(backend, &mut input, filled, scratch, &mut out);
             let _ = give_back.send(Returned::Input(input));
             result
         }
@@ -210,6 +204,7 @@ struct Running<W, B> {
     assembler: StreamAssembler,
     raw: Vec<u8>,
     raw_bytes: usize,
+    block_bytes: usize,
     filling: Option<Vec<u8>>,
     spare_inputs: Vec<Vec<u8>>,
     spare_outputs: Vec<Vec<u8>>,
@@ -237,11 +232,10 @@ impl<W> Pipeline for StartEncoding<W> {
 
 impl<W> Starts<Self> for StartEncoding<W> {
     fn start<B: Engine>(self, backend: B) -> Running<W, B> {
-        let splitter = BlockSplitter::new(self.level);
-        let block_bytes = splitter.block_bytes();
+        let block_bytes = self.level.block_bytes();
         let threads = self.threads.max(1);
         let raw_bytes = RAW_BUFFER_BLOCKS * block_bytes;
-        let scratch_words = encode_scratch_words(block_bytes);
+        let scratch_words = encode_scratch_words(self.level);
         let (give_back, returned) = channel();
         let workers = Workers::new(threads, move |task: Task| {
             let _ = give_back.send(Returned::Started);
@@ -250,10 +244,11 @@ impl<W> Starts<Self> for StartEncoding<W> {
         });
         Running {
             inner: self.inner,
-            splitter,
+            splitter: BlockSplitter::new(self.level),
             assembler: StreamAssembler::new(self.level),
             raw: Vec::with_capacity(raw_bytes),
             raw_bytes,
+            block_bytes,
             filling: None,
             spare_inputs: Vec::new(),
             spare_outputs: Vec::new(),
@@ -347,9 +342,9 @@ impl<W: Write, B: Engine> Running<W, B> {
 
     fn fill_from_raw(&mut self) -> io::Result<()> {
         let mut block = self.spare_input();
-        block.resize(self.splitter.block_bytes(), 0);
+        block.resize(self.block_bytes, 0);
         self.splitter
-            .fill_scanned_with(self.backend, &self.raw, &mut block)
+            .fill_scanned(self.backend, &self.raw, &mut block)
             .map_err(to_io)?;
         self.raw.clear();
         self.filling = Some(block);
@@ -379,11 +374,7 @@ impl<W: Write, B: Engine> Running<W, B> {
             let block = encoded.result.map_err(to_io)?;
             let count = self
                 .assembler
-                .append(
-                    &encoded.output[..block.byte_length()],
-                    block,
-                    &mut self.joined,
-                )
+                .append(&encoded.output, block, &mut self.joined)
                 .map_err(to_io)?;
             self.inner.write_all(&self.joined[..count])?;
             self.spare_outputs.push(encoded.output);
@@ -396,14 +387,14 @@ impl<W: Write, B: Engine> Running<W, B> {
             let (taken, full) = if let Some(block) = &mut self.filling {
                 let (taken, full) = self
                     .splitter
-                    .fill_with(self.backend, input, block)
+                    .fill(self.backend, input, block)
                     .map_err(to_io)?;
                 (taken, full.map(Job::Filled))
             } else if self.raw.len() < self.raw_bytes {
                 let room = self.raw_bytes - self.raw.len();
                 let (taken, full) = self
                     .splitter
-                    .scan_with(self.backend, &input[..input.len().min(room)]);
+                    .scan(self.backend, &input[..input.len().min(room)]);
                 self.raw.extend_from_slice(&input[..taken]);
                 (taken, full.map(Job::Raw))
             } else {
@@ -439,31 +430,19 @@ impl<W: Write, B: Engine> Running<W, B> {
     }
 }
 
-/// Compresses data written to it on every core and writes the bzip2 stream, in order, to
-/// another writer on the calling thread.
-///
-/// Call [`ParallelEncoder::finish`] to end the stream and get the writer back. Dropping
-/// it also ends the stream, but ignores errors. `flush` writes out the blocks compressed
-/// so far and flushes the inner writer; it does not end the current block.
+/// Compresses data written to it on every core into another writer. Dropping it ends the
+/// stream but ignores errors.
 pub struct ParallelEncoder<W: Write> {
     running: Option<Started<StartEncoding<W>>>,
 }
 
 impl<W: Write> ParallelEncoder<W> {
-    /// Compresses into `inner` at `level` on as many threads as there are cores.
-    ///
-    /// # Panics
-    ///
-    /// If the operating system cannot start the threads.
+    /// Compresses into `inner` at `level` on every core.
     pub fn new(inner: W, level: Level) -> Self {
         Self::with_threads(inner, level, every_core())
     }
 
     /// Compresses into `inner` at `level` on `threads` threads.
-    ///
-    /// # Panics
-    ///
-    /// If the operating system cannot start the threads.
     pub fn with_threads(inner: W, level: Level, threads: usize) -> Self {
         Self {
             running: Some(start(StartEncoding {
@@ -478,10 +457,8 @@ impl<W: Write> ParallelEncoder<W> {
         self.running.as_mut().ok_or_else(finished_already)
     }
 
-    /// Says that `bytes` more bytes will be written. Near the end of that input, blocks
-    /// get smaller so every thread finishes at about the same time, down to 400 KB; the
-    /// stream is slightly larger and its bytes depend on the thread count. Input that
-    /// turns out longer or shorter is still compressed correctly.
+    /// Says that `bytes` more bytes will be written, so the last blocks shrink to finish on
+    /// every thread at once. The output then depends on the thread count.
     pub fn expect_input_bytes(&mut self, bytes: u64) {
         if let Some(running) = self.running.as_mut() {
             on_engine!(running, running => running.expect_input_bytes(bytes));
@@ -519,10 +496,6 @@ impl<W: Write> Drop for ParallelEncoder<W> {
 }
 
 /// Compresses all of `data` at `level` on every core.
-///
-/// # Panics
-///
-/// If a compression thread panics, which is a bug.
 #[must_use]
 pub fn compress(data: &[u8], level: Level) -> Vec<u8> {
     let mut encoder = ParallelEncoder::new(Vec::new(), level);

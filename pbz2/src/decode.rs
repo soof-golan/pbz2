@@ -8,9 +8,11 @@ use crate::pool::{every_core, with_scratch};
 use crate::split::{Decoded, Kind, Segment, Spares, Splitter};
 use crate::workers::Workers;
 use pbz2_core::{
-    Backend, Decoder, Error, MAX_COMPRESSED_BLOCK_BYTES, Pulled, SCRATCH_WORDS, StreamChecker,
+    Backend, Decoder, Error, Level, MAX_COMPRESSED_BLOCK_BYTES, Pulled, StreamChecker,
+    decode_scratch_words,
 };
 
+const SCRATCH_WORDS: usize = decode_scratch_words(Level::BEST);
 const READ_BYTES: usize = 128 << 10;
 const SINGLE_READ_BYTES: usize = 64 << 10;
 const CREDITS_PER_THREAD: usize = 12;
@@ -407,38 +409,25 @@ impl<R: Read + Send + 'static> Starts<Decoding> for StartDecoding<R> {
     }
 }
 
-/// Decompresses bzip2 data from a reader on every core, and reads out in order.
-///
-/// Blocks are decoded as soon as their data arrives, so it works on data that is still
-/// being received, such as a download.
+/// Decompresses bzip2 data from a reader on every core, decoding blocks as they arrive.
 pub struct ParallelDecoder {
     joiner: Started<Decoding>,
 }
 
 impl ParallelDecoder {
-    /// Starts decoding `input` on as many threads as there are cores.
-    ///
-    /// # Panics
-    ///
-    /// If the operating system cannot start the threads.
+    /// Decodes `input` on every core.
     pub fn new(input: impl Read + Send + 'static) -> Self {
         Self::with_threads(input, every_core())
     }
 
-    /// Starts decoding `input` on `threads` threads, plus one that reads `input`.
-    ///
-    /// # Panics
-    ///
-    /// If the operating system cannot start the threads.
+    /// Decodes `input` on `threads` threads, plus one that reads it.
     pub fn with_threads(input: impl Read + Send + 'static, threads: usize) -> Self {
         Self {
             joiner: start(StartDecoding { input, threads }),
         }
     }
 
-    /// Whether the data ended with bytes after the last stream that are not another
-    /// stream. They are ignored, and the bzip2 tool warns about them. Ask once reading has
-    /// returned 0.
+    /// Whether ignored bytes followed the last stream, once reading has returned 0.
     #[must_use]
     pub fn has_trailing_bytes(&self) -> bool {
         on_engine!(&self.joiner, joiner => joiner.has_trailing_bytes())
@@ -500,9 +489,6 @@ impl<R> Starts<Self> for StartReading<R> {
 }
 
 /// Decompresses bzip2 data from a reader on the calling thread.
-///
-/// Its input buffer holds the largest block bzip2 allows, and is filled 64 KB at a time,
-/// so memory grows only as far as the largest block read needs.
 pub struct DecoderReader<R> {
     reading: Started<StartReading<R>>,
 }
@@ -515,9 +501,7 @@ impl<R: Read> DecoderReader<R> {
         }
     }
 
-    /// Whether the data ended with bytes after the last stream that are not another
-    /// stream. They are ignored, and the bzip2 tool warns about them. Ask once reading has
-    /// returned 0.
+    /// Whether ignored bytes followed the last stream, once reading has returned 0.
     #[must_use]
     pub fn has_trailing_bytes(&self) -> bool {
         on_engine!(&self.reading, reading => reading.decoder.has_trailing_bytes())
@@ -569,7 +553,7 @@ impl<R: Read, B: Backend> Reading<R, B> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Data`] if the data is damaged or is not bzip2.
+/// [`crate::Error::Data`].
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, crate::Error> {
     let mut out = Vec::new();
     ParallelDecoder::new(Cursor::new(data.to_vec())).read_to_end(&mut out)?;

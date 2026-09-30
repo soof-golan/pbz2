@@ -162,10 +162,9 @@ mod folded {
     }
 }
 
-/// Folds one block's CRC into the running CRC of its stream, the way bzip2 does.
 #[inline]
 #[must_use]
-pub fn combine(stream_crc: u32, block_crc: u32) -> u32 {
+pub(crate) fn combine(stream_crc: u32, block_crc: u32) -> u32 {
     stream_crc.rotate_left(1) ^ block_crc
 }
 

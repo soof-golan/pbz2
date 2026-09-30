@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use pbz2_core::{
     Backend, BlockOutput, Error, Level, MAX_COMPRESSED_BLOCK_BYTES, MarkerKind, Scanner,
-    decode_block_into_with,
+    decode_block_into,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,13 +101,13 @@ impl Segment {
         spares: &Spares,
         backend: B,
     ) -> Result<Decoded, Error> {
-        let mut output = decode_block_into_with(
+        let mut output = decode_block_into(
+            backend,
             &self.bytes,
             self.first_bit,
             self.end_bit(),
             Level::BEST,
             scratch,
-            backend,
         )?;
         let expected = output.block_length() as usize;
         let first = (expected + (expected >> 3)).clamp(SMALLEST_BYTES, EXPANDED_BYTES);
@@ -186,7 +186,7 @@ impl Splitter {
     ) -> Result<(), Error> {
         self.pending.extend_from_slice(piece);
         let mut markers = std::mem::take(&mut self.markers);
-        self.scanner.scan_with(backend, piece, |marker| {
+        self.scanner.scan(backend, piece, |marker| {
             let kind = match marker.kind {
                 MarkerKind::Block => Kind::Block,
                 MarkerKind::End => Kind::End,

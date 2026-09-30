@@ -9,8 +9,8 @@ use common::{
 use md5::{Digest, Md5};
 use pbz2::Level;
 use pbz2::pbz2_core::{
-    BlockSplitter, ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS, Encoder, Error, Pulled,
-    StreamAssembler, encode_block, encode_scratch_words, encoded_block_bytes,
+    BlockSplitter, Encoder, Error, Pulled, StreamAssembler, encode_block, encode_scratch_words,
+    encoded_block_bytes, native,
 };
 
 const SAMPLE1_REF: &[u8] = include_bytes!("../../testdata/sample1.ref");
@@ -188,7 +188,7 @@ fn small_buffer_makes_small_blocks() {
     let mut encoder = Encoder::new(
         Level::BEST,
         vec![0u8; block],
-        vec![0u32; encode_scratch_words(block)],
+        vec![0u32; encode_scratch_words(Level::BEST)],
     )
     .expect("the buffers are big enough");
     let mut out = Vec::new();
@@ -218,37 +218,35 @@ fn level_accepts_only_1_to_9() {
 
 #[test]
 fn small_buffers_are_refused() {
+    let bytes = Level::BEST.block_bytes();
+    let words = encode_scratch_words(Level::BEST);
     let encoder = |buffer: usize, scratch: usize| {
         Encoder::new(Level::BEST, vec![0u8; buffer], vec![0u32; scratch]).err()
     };
-    assert_eq!(
-        encoder(7, ENCODE_SCRATCH_WORDS),
-        Some(Error::BufferTooSmall)
-    );
-    assert_eq!(
-        encoder(ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS - 1),
-        Some(Error::ScratchTooSmall)
-    );
-    assert_eq!(encoder(ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS), None);
+    assert_eq!(encoder(7, words), Some(Error::BufferTooSmall));
+    assert_eq!(encoder(bytes, words - 1), Some(Error::ScratchTooSmall));
+    assert_eq!(encoder(bytes, words), None);
 
     let mut splitter = BlockSplitter::new(Level::FASTEST);
-    let bytes = splitter.block_bytes();
-    let mut small = vec![0u8; bytes - 1];
+    let mut small = vec![0u8; LEVEL_1_BLOCK - 1];
     assert_eq!(
-        splitter.fill(b"data", &mut small).err(),
+        splitter.fill(native(), b"data", &mut small).err(),
         Some(Error::BufferTooSmall)
     );
-    let mut block = vec![0u8; bytes];
-    let (taken, filled) = splitter.fill(b"data", &mut block).expect("the block fits");
+    let mut block = vec![0u8; LEVEL_1_BLOCK];
+    let (taken, filled) = splitter
+        .fill(native(), b"data", &mut block)
+        .expect("the block fits");
     assert_eq!((taken, filled), (4, None));
     let input = splitter
         .finish(&mut block)
         .expect("the block fits")
         .expect("there is a block");
-    let words = encode_scratch_words(input.length());
+    let words = encode_scratch_words(Level::FASTEST);
     let out_bytes = encoded_block_bytes(input.length());
     let encode = |scratch: usize, out: usize| {
         encode_block(
+            native(),
             &mut block.clone(),
             input,
             &mut vec![0u32; scratch],
@@ -256,7 +254,7 @@ fn small_buffers_are_refused() {
         )
         .err()
     };
-    assert_eq!(encode(words - 1, out_bytes), Some(Error::ScratchTooSmall));
+    assert_eq!(encode(0, out_bytes), Some(Error::ScratchTooSmall));
     assert_eq!(encode(words, out_bytes - 1), Some(Error::BufferTooSmall));
     assert_eq!(encode(words, out_bytes), None);
     let assembler = StreamAssembler::new(Level::FASTEST);

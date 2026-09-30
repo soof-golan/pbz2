@@ -4,21 +4,13 @@ use crate::bits::BitReader;
 use crate::crc;
 use crate::huffman::{MAX_ALPHABET, MAX_CODE_LENGTH, Table};
 use crate::level::Level;
-use crate::native::native;
 use crate::randomized;
 
-/// The 48-bit marker that starts every bzip2 block.
-pub const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
-/// The 48-bit marker that ends every bzip2 stream.
-pub const END_MAGIC: u64 = 0x1772_4538_5090;
-/// How many bytes a block may hold for each step of the stream's block size (1 to 9).
-pub const BLOCK_SIZE_STEP: usize = 100_000;
-/// Scratch words needed to decode any block.
-pub const SCRATCH_WORDS: usize = decode_scratch_words(Level::BEST);
+pub(crate) const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
+pub(crate) const END_MAGIC: u64 = 0x1772_4538_5090;
+pub(crate) const BLOCK_SIZE_STEP: usize = 100_000;
 
-/// Scratch words needed to decode a block at `level`: one word for each byte the block may
-/// hold, for the inverse transform, a quarter word per byte for its output, and 129 pages
-/// of 256 words for walking the transform in pieces.
+/// Scratch words needed to decode a block at `level`.
 #[must_use]
 pub const fn decode_scratch_words(level: Level) -> usize {
     let block = level.block_bytes();
@@ -34,10 +26,7 @@ const LONGEST_RUN_WEIGHT: u32 = 2 * 1024 * 1024;
 const SYMBOLS_PER_FILL: usize = 2;
 const WRITTEN_AHEAD: usize = 8;
 
-/// The state of one decoded block while its bytes are being read out.
-///
-/// It does not hold the scratch space; pass the same scratch to [`BlockOutput::read`]
-/// that was given to [`decode_block_into`].
+/// A decoded block whose bytes are read out of the scratch given to [`decode_block_into`].
 #[derive(Debug, Clone)]
 pub struct BlockOutput {
     bytes_at: u32,
@@ -191,8 +180,7 @@ impl BlockOutput {
     ///
     /// # Errors
     ///
-    /// [`Error::Truncated`] if bytes are still unread, [`Error::BlockCrcMismatch`] if the
-    /// checksum does not match.
+    /// [`Error::Truncated`] or [`Error::BlockCrcMismatch`].
     pub const fn finish(&self) -> Result<u32, Error> {
         if !self.is_finished() {
             return Err(Error::Truncated);
@@ -203,33 +191,30 @@ impl BlockOutput {
         Ok(self.stored_crc)
     }
 
-    /// The bit right after the block, where the next block or end marker starts.
+    /// The bit right after the block.
     #[must_use]
     pub const fn end_bit(&self) -> u64 {
         self.end_bit
     }
 
-    /// How many symbols the block holds before its last run-length step, which is what
-    /// the stream's block size limits.
+    /// The block's length before its last run-length step.
     #[must_use]
     pub const fn block_length(&self) -> u32 {
         self.block_length + self.moved_past
     }
 
-    /// How many words [`BlockOutput::move_bytes`] needs: the block's unread bytes before
-    /// its last run-length step, four to a word, at most a quarter of the block size.
+    /// How many words [`BlockOutput::move_bytes`] needs.
     #[must_use]
     pub const fn byte_words(&self) -> usize {
         ((self.block_length as usize + 3) >> 2) - (self.position as usize >> 2)
     }
 
-    /// Copies the block's unread bytes out of `scratch` into `into` and returns the output
-    /// that reads them from `into`, so `scratch` is free to decode another block. `into`
-    /// must hold [`BlockOutput::byte_words`] words.
+    /// Moves the unread bytes from `scratch` into `into` and returns the output that reads
+    /// them there, freeing `scratch`.
     ///
     /// # Errors
     ///
-    /// [`Error::ScratchTooSmall`] if `scratch` or `into` is too small.
+    /// [`Error::ScratchTooSmall`].
     pub fn move_bytes(&self, scratch: &[u32], into: &mut [u32]) -> Result<Self, Error> {
         let words = self.byte_words();
         let skipped = self.position & !3;
@@ -255,39 +240,19 @@ impl BlockOutput {
     }
 }
 
-/// Decodes the block whose marker starts at `start_bit` of `bytes`, reading no further
-/// than `end_bit`, and returns the state for reading its bytes out of `scratch` with
-/// [`BlockOutput::read`].
-///
-/// `level` is the block size from the stream header. The scratch space must hold
-/// [`decode_scratch_words`] words; [`SCRATCH_WORDS`] is always enough.
+/// Decodes the block whose marker is at `start_bit` of `bytes`, reading no further than
+/// `end_bit`, into `scratch` of [`decode_scratch_words`] words.
 ///
 /// # Errors
 ///
-/// [`Error::Truncated`] if the block does not end before `end_bit`, and the other
-/// variants of [`Error`] for damaged data.
-pub fn decode_block_into(
-    bytes: &[u8],
-    start_bit: u64,
-    end_bit: u64,
-    level: Level,
-    scratch: &mut [u32],
-) -> Result<BlockOutput, Error> {
-    decode_block_into_with(bytes, start_bit, end_bit, level, scratch, native())
-}
-
-/// Like [`decode_block_into`], with the inner loops run by `backend`.
-///
-/// # Errors
-///
-/// See [`decode_block_into`].
-pub fn decode_block_into_with<B: Backend>(
-    bytes: &[u8],
-    start_bit: u64,
-    end_bit: u64,
-    level: Level,
-    scratch: &mut [u32],
+/// [`Error::Truncated`] if the block does not end before `end_bit`, or damaged data.
+pub fn decode_block_into<B: Backend>(
     backend: B,
+    bytes: &[u8],
+    start_bit: u64,
+    end_bit: u64,
+    level: Level,
+    scratch: &mut [u32],
 ) -> Result<BlockOutput, Error> {
     backend.run(
         #[inline(always)]
