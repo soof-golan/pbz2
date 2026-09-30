@@ -16,12 +16,14 @@ Every buffer size is a constant or `const fn`, so buffers can be static arrays:
 
 | | Input | Scratch |
 | --- | --- | --- |
-| Decoding | `MAX_COMPRESSED_BLOCK_BYTES` | `SCRATCH_WORDS` |
-| Encoding | `ENCODE_BUFFER_BYTES` | `ENCODE_SCRATCH_WORDS` |
+| Decoding | `MAX_COMPRESSED_BLOCK_BYTES` | `decode_scratch_words(level)` |
+| Encoding | `level.block_bytes()` | `encode_scratch_words(level)` |
 
 ```rust
-let mut input = [0u8; pbz2_core::MAX_COMPRESSED_BLOCK_BYTES];
-let mut scratch = [0u32; pbz2_core::SCRATCH_WORDS];
+use pbz2_core::{Level, MAX_COMPRESSED_BLOCK_BYTES, decode_scratch_words};
+
+let mut input = [0u8; MAX_COMPRESSED_BLOCK_BYTES];
+let mut scratch = [0u32; decode_scratch_words(Level::BEST)];
 let mut decoder = pbz2_core::Decoder::new(&mut input[..], &mut scratch[..]);
 // decoder.push(bytes), decoder.pull(&mut out), decoder.end_input()
 ```
@@ -30,8 +32,9 @@ pbz2's `src/decode.rs` and `src/encode.rs` show the per-block API on threads.
 
 ## SIMD
 
-`Native` is the backend chosen at compile time: SIMD with the `simd` feature, `Scalar`
-without it. The only `unsafe` code is one carry-less multiply for the CRC, with `simd`.
+Functions that run inner loops take a `Backend`. `native()` is the one chosen at compile
+time: SIMD with the `simd` feature, `Scalar` without it. The only `unsafe` code is one
+carry-less multiply for the CRC, with `simd`.
 
 ## License
 
