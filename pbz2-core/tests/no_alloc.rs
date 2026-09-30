@@ -1,8 +1,8 @@
 use std::io::Read;
 
 use pbz2_core::{
-    Decoder, ENCODE_SCRATCH_WORDS, Encoder, Error, Level, MarkerKind, Pulled, SCRATCH_WORDS,
-    Scanner, combine_crc, decode_block_into, decode_scratch_words,
+    Decoder, Encoder, Error, Level, MarkerKind, Pulled, Scanner, decode_block_into,
+    decode_scratch_words, encode_scratch_words, native,
 };
 
 const SAMPLE1_BZ2: &[u8] = include_bytes!("../../testdata/sample1.bz2");
@@ -13,7 +13,7 @@ const SAMPLE3_REF: &[u8] = include_bytes!("../../testdata/sample3.ref");
 #[test]
 fn decoder_on_borrowed_buffers() {
     let mut input_buffer = [0u8; 4096];
-    let mut scratch = vec![0u32; SCRATCH_WORDS];
+    let mut scratch = vec![0u32; decode_scratch_words(Level::BEST)];
     let mut decoder = Decoder::new(&mut input_buffer[..], &mut scratch[..]);
     let mut pending = SAMPLE3_BZ2;
     let mut out = Vec::new();
@@ -36,7 +36,7 @@ fn decoder_on_borrowed_buffers() {
 #[test]
 fn encoder_on_borrowed_buffers() {
     let mut input_buffer = vec![0u8; 50_000];
-    let mut scratch = vec![0u32; ENCODE_SCRATCH_WORDS];
+    let mut scratch = vec![0u32; encode_scratch_words(Level::BEST)];
     let mut encoder = Encoder::new(Level::BEST, &mut input_buffer[..], &mut scratch[..])
         .expect("the buffers are big enough");
     let mut pending = SAMPLE3_REF;
@@ -60,7 +60,7 @@ fn encoder_on_borrowed_buffers() {
 #[test]
 fn oversized_block_returns_buffer_too_small() {
     let mut input_buffer = [0u8; 1024];
-    let mut scratch = vec![0u32; SCRATCH_WORDS];
+    let mut scratch = vec![0u32; decode_scratch_words(Level::BEST)];
     let mut decoder = Decoder::new(&mut input_buffer[..], &mut scratch[..]);
     let mut pending = SAMPLE1_BZ2;
     let mut chunk = [0u8; 1000];
@@ -82,7 +82,7 @@ fn scanned_blocks_decode_independently() {
     let mut markers = Vec::new();
     let mut scanner = Scanner::new();
     for piece in SAMPLE1_BZ2.chunks(100) {
-        scanner.scan(piece, |marker| markers.push(marker));
+        scanner.scan(native(), piece, |marker| markers.push(marker));
     }
     let level = Level::new(SAMPLE1_BZ2[3] - b'0').expect("the header names a level");
     assert!(markers.len() >= 2);
@@ -93,11 +93,17 @@ fn scanned_blocks_decode_independently() {
 
     let mut scratch = vec![0u32; decode_scratch_words(level)];
     let mut out = Vec::new();
-    let mut stream_crc = 0;
+    let mut stream_crc = 0u32;
     for pair in markers.windows(2) {
-        let mut block =
-            decode_block_into(SAMPLE1_BZ2, pair[0].bit, pair[1].bit, level, &mut scratch)
-                .expect("the block decodes");
+        let mut block = decode_block_into(
+            native(),
+            SAMPLE1_BZ2,
+            pair[0].bit,
+            pair[1].bit,
+            level,
+            &mut scratch,
+        )
+        .expect("the block decodes");
         let mut chunk = [0u8; 777];
         loop {
             let count = block.read(&scratch, &mut chunk);
@@ -107,7 +113,7 @@ fn scanned_blocks_decode_independently() {
             out.extend_from_slice(&chunk[..count]);
         }
         assert_eq!(block.end_bit(), pair[1].bit);
-        stream_crc = combine_crc(stream_crc, block.finish().expect("the checksum matches"));
+        stream_crc = stream_crc.rotate_left(1) ^ block.finish().expect("the checksum matches");
     }
     assert_eq!(out, SAMPLE1_REF);
 

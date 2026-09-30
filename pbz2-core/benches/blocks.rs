@@ -3,8 +3,8 @@ use std::io::Write;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use pbz2_core::{
-    Backend, BlockSplitter, ENCODE_SCRATCH_WORDS, InputBlock, Level, MarkerKind, SCRATCH_WORDS,
-    Scalar, Scanner, decode_block_into_with, encode_block_with, encoded_block_bytes,
+    Backend, BlockSplitter, InputBlock, Level, MarkerKind, Scalar, Scanner, decode_block_into,
+    decode_scratch_words, encode_block, encode_scratch_words, encoded_block_bytes,
 };
 
 fn sample() -> Vec<u8> {
@@ -28,9 +28,9 @@ fn sample() -> Vec<u8> {
 
 fn first_block(data: &[u8]) -> (Vec<u8>, InputBlock) {
     let mut splitter = BlockSplitter::new(Level::BEST);
-    let mut block = vec![0u8; splitter.block_bytes()];
+    let mut block = vec![0u8; Level::BEST.block_bytes()];
     let (_, full) = splitter
-        .fill(data, &mut block)
+        .fill(Scalar, data, &mut block)
         .expect("the block buffer fits");
     let input = match full {
         Some(input) => input,
@@ -47,7 +47,7 @@ fn one_block_of_bzip2(original: &[u8]) -> (Vec<u8>, u64, u64) {
     encoder.write_all(original).expect("bzip2 compresses");
     let packed = encoder.finish().expect("bzip2 finishes");
     let mut markers = Vec::new();
-    Scanner::new().scan(&packed, |marker| markers.push(marker));
+    Scanner::new().scan(Scalar, &packed, |marker| markers.push(marker));
     let start = markers
         .iter()
         .find(|marker| marker.kind == MarkerKind::Block)
@@ -63,7 +63,7 @@ fn one_block_of_bzip2(original: &[u8]) -> (Vec<u8>, u64, u64) {
 
 fn encode_one<B: Backend>(criterion: &mut Criterion, name: &str, backend: B) {
     let (block, input) = first_block(&sample());
-    let mut scratch = vec![0u32; ENCODE_SCRATCH_WORDS];
+    let mut scratch = vec![0u32; encode_scratch_words(Level::BEST)];
     let mut out = vec![0u8; encoded_block_bytes(input.length())];
     let mut group = criterion.benchmark_group("encode a block");
     group.throughput(Throughput::Bytes(input.length() as u64));
@@ -72,7 +72,7 @@ fn encode_one<B: Backend>(criterion: &mut Criterion, name: &str, backend: B) {
             || block.clone(),
             |block| {
                 black_box(
-                    encode_block_with(block, input, &mut scratch, &mut out, backend)
+                    encode_block(backend, block, input, &mut scratch, &mut out)
                         .expect("the buffers fit"),
                 )
             },
@@ -86,14 +86,14 @@ fn decode_one<B: Backend>(criterion: &mut Criterion, name: &str, backend: B) {
     let data = sample();
     let original = &data[..data.len().min(Level::BEST.block_bytes() - 19)];
     let (packed, start, end) = one_block_of_bzip2(original);
-    let mut scratch = vec![0u32; SCRATCH_WORDS];
+    let mut scratch = vec![0u32; decode_scratch_words(Level::BEST)];
     let mut out = vec![0u8; 1 << 16];
     let mut group = criterion.benchmark_group("decode a block");
     group.throughput(Throughput::Bytes(original.len() as u64));
     group.bench_function(name, |bencher| {
         bencher.iter(|| {
             let mut output =
-                decode_block_into_with(&packed, start, end, Level::BEST, &mut scratch, backend)
+                decode_block_into(backend, &packed, start, end, Level::BEST, &mut scratch)
                     .expect("the block decodes");
             while output.read(&scratch, &mut out) > 0 {}
             black_box(output.finish().expect("the checksum matches"))

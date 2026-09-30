@@ -1,5 +1,7 @@
 use std::fs::{self, File, FileTimes, Metadata, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, fchown};
 use std::path::{Path, PathBuf};
 
 use eyre::{Report, WrapErr, eyre};
@@ -7,7 +9,7 @@ use pbz2::{DecoderReader, EncoderWriter, Level, ParallelDecoder, ParallelEncoder
 
 use crate::names;
 
-const BUFFER_BYTES: usize = 1 << 20;
+const BUFFER_BYTES: usize = 128 << 10;
 const STDIN_NAME: &str = "(stdin)";
 const SHORTEST_NAME_COLUMN: usize = 7;
 
@@ -60,10 +62,7 @@ fn is_broken_pipe(report: &Report) -> bool {
 
 fn copy_attributes(from: &Metadata, to: &File) -> io::Result<()> {
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let _ = std::os::unix::fs::fchown(to, Some(from.uid()), Some(from.gid()));
-    }
+    let _ = fchown(to, Some(from.uid()), Some(from.gid()));
     to.set_permissions(from.permissions())?;
     to.set_times(
         FileTimes::new()

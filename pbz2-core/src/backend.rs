@@ -1,3 +1,6 @@
+#[cfg(feature = "simd")]
+use fearless_simd::{Select, SimdBase, SimdMask, u8x16};
+
 /// The code that runs the inner loops, picked at compile time.
 ///
 /// [`Scalar`] works everywhere. With the `simd` feature, [`Vectorized`] runs them with the
@@ -31,10 +34,29 @@ pub trait Backend: Copy {
         };
         half(low, previous) | (half(high, bytes[7]) << 8)
     }
+
+    /// Returns a mask whose bit `i` is set when `bytes[i]` and `bytes[i + 1]` may be two
+    /// whole bytes of a block or end-of-stream marker. It may set bits for pairs that are
+    /// not, but never misses one that is.
+    fn marker_pairs(self, bytes: &[u8; 17]) -> u16 {
+        crate::scan::exact_marker_pairs(bytes)
+    }
 }
 
 type Front = u128;
 const FRONT_BYTES: usize = 16;
+#[cfg(feature = "simd")]
+const NEAR_POSITIONS: usize = 64;
+#[cfg(feature = "simd")]
+const LANE_INDEX: [u8; 256] = {
+    let mut index = [0; 256];
+    let mut lane = 0;
+    while lane < 256 {
+        index[lane] = lane as u8;
+        lane += 1;
+    }
+    index
+};
 const LANE_ONES: Front = Front::MAX / 0xff;
 const LANE_LOW: Front = LANE_ONES * 0x7f;
 
@@ -91,15 +113,6 @@ impl Recent {
         let position = backend.move_to_front(&mut self.list, index);
         self.front_from_list();
         position
-    }
-
-    #[inline(always)]
-    pub(crate) const fn first_of(&self, in_register: bool) -> u8 {
-        if in_register {
-            self.front as u8
-        } else {
-            self.list[0]
-        }
     }
 
     #[inline(always)]
@@ -178,7 +191,6 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn equal_to_previous(self, bytes: &[u8; 16], previous: u8) -> u16 {
-        use fearless_simd::{SimdBase, SimdMask, u8x16};
         let simd = self.0;
         let values = u8x16::from_slice(simd, bytes);
         let before = u8x16::splat(simd, previous).slide::<15>(values);
@@ -186,8 +198,22 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
     }
 
     #[inline(always)]
+    fn marker_pairs(self, bytes: &[u8; 17]) -> u16 {
+        let simd = self.0;
+        let [first_low, first_high, second_low, second_high] =
+            crate::scan::PAIR_NIBBLES.map(|table| u8x16::from_slice(simd, &table));
+        let nibble = u8x16::splat(simd, 15);
+        let first = u8x16::from_slice(simd, &bytes[..16]);
+        let second = u8x16::from_slice(simd, &bytes[1..]);
+        let first = first_low.swizzle_dyn_within_blocks(first & nibble)
+            & first_high.swizzle_dyn_within_blocks(first >> 4);
+        let second = second_low.swizzle_dyn_within_blocks(second & nibble)
+            & second_high.swizzle_dyn_within_blocks(second >> 4);
+        !((first & second).simd_eq(u8x16::splat(simd, 0)).to_bitmask() as u16)
+    }
+
+    #[inline(always)]
     fn move_to_front(self, recent: &mut [u8; 256], index: u8) -> usize {
-        use fearless_simd::{Select, SimdBase, SimdMask, mask8x16, u8x16};
         let simd = self.0;
         let wanted = u8x16::splat(simd, index);
         let mut carry = wanted;
@@ -201,7 +227,8 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
                 continue;
             }
             let lane = found.trailing_zeros();
-            let moved = mask8x16::from_bitmask(simd, (2u64 << lane) - 1);
+            let last = u8x16::splat(simd, lane as u8);
+            let moved = u8x16::from_slice(simd, &LANE_INDEX[..16]).simd_le(last);
             moved.select(shifted, values).store_slice(chunk);
             return chunk_index * 16 + lane as usize;
         }
@@ -210,22 +237,30 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn move_position_to_front(self, recent: &mut [u8; 256], position: usize) -> u8 {
-        use fearless_simd::{Select, SimdBase, SimdMask, mask8x16, u8x16};
         let simd = self.0;
         let value = recent[position];
+        let chunks = if position < NEAR_POSITIONS {
+            NEAR_POSITIONS / 16
+        } else {
+            16
+        };
         let mut carry = u8x16::splat(simd, value);
-        let last_chunk = position >> 4;
-        for chunk in recent.as_chunks_mut::<16>().0.iter_mut().take(last_chunk) {
+        let last = u8x16::splat(simd, position as u8);
+        let lanes = LANE_INDEX.as_chunks::<16>().0;
+        for (chunk, lanes) in recent
+            .as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .zip(lanes)
+            .take(chunks)
+        {
             let values = u8x16::from_slice(simd, chunk);
-            carry.slide::<15>(values).store_slice(chunk);
+            let moved = u8x16::from_slice(simd, lanes).simd_le(last);
+            moved
+                .select(carry.slide::<15>(values), values)
+                .store_slice(chunk);
             carry = values;
         }
-        let chunk = &mut recent[last_chunk * 16..last_chunk * 16 + 16];
-        let values = u8x16::from_slice(simd, chunk);
-        let moved = mask8x16::from_bitmask(simd, (2u64 << (position & 15)) - 1);
-        moved
-            .select(carry.slide::<15>(values), values)
-            .store_slice(chunk);
         value
     }
 }
@@ -292,7 +327,7 @@ mod tests {
             let value = list.remove(pick);
             list.insert(0, value);
             assert_eq!(recent.take_position(backend, pick, in_register), value);
-            assert_eq!(recent.first_of(in_register), list[0]);
+            assert_eq!(recent.take_position(backend, 0, in_register), list[0]);
             if !in_register {
                 continue;
             }
@@ -302,6 +337,25 @@ mod tests {
             list.insert(0, wanted);
             assert_eq!(recent.take(backend, wanted), position);
             assert_eq!(recent.first(), list[0]);
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    fn assert_marker_pairs_cover_exact<B: Backend>(backend: B) {
+        for first in 0..=255u8 {
+            for second in 0..=255u8 {
+                let at = usize::from(first ^ second) % 16;
+                let mut bytes = [0u8; 17];
+                bytes[at] = first;
+                bytes[at + 1] = second;
+                let exact = crate::scan::exact_marker_pairs(&bytes);
+                let found = backend.marker_pairs(&bytes);
+                assert_eq!(
+                    found & exact,
+                    exact,
+                    "pair {first:#04x} {second:#04x} at {at}"
+                );
+            }
         }
     }
 
@@ -329,6 +383,7 @@ mod tests {
         if let Some(neon) = neon {
             assert_matches_list(Vectorized(neon));
             assert_equal_to_previous_matches_bytes(Vectorized(neon));
+            assert_marker_pairs_cover_exact(Vectorized(neon));
         }
     }
 
@@ -338,6 +393,7 @@ mod tests {
         if let Some(sse) = fearless_simd::Level::new().as_sse4_2() {
             assert_matches_list(Vectorized(sse));
             assert_equal_to_previous_matches_bytes(Vectorized(sse));
+            assert_marker_pairs_cover_exact(Vectorized(sse));
         }
     }
 }

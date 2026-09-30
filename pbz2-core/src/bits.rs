@@ -5,7 +5,6 @@ pub(crate) struct BitReader<'a> {
     window: u64,
     available: u32,
     next_byte: usize,
-    position: u64,
     end: u64,
 }
 
@@ -16,7 +15,6 @@ impl<'a> BitReader<'a> {
             window: 0,
             available: 0,
             next_byte: (start_bit >> 3) as usize,
-            position: start_bit,
             end: end_bit,
         };
         reader.refill();
@@ -27,7 +25,14 @@ impl<'a> BitReader<'a> {
     }
 
     pub(crate) const fn position(&self) -> u64 {
-        self.position
+        self.next_byte as u64 * 8 - self.available as u64
+    }
+
+    pub(crate) const fn check_end(&self) -> Result<(), Error> {
+        if self.position() > self.end {
+            return Err(Error::Truncated);
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -71,15 +76,9 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline(always)]
-    pub(crate) fn skip_filled(&mut self, count: u32) -> Result<(), Error> {
-        let next = self.position + u64::from(count);
-        if next > self.end {
-            return Err(Error::Truncated);
-        }
-        self.position = next;
+    pub(crate) const fn skip_filled(&mut self, count: u32) {
         self.window <<= count;
         self.available -= count;
-        Ok(())
     }
 
     #[inline(always)]
@@ -95,14 +94,12 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     pub(crate) fn skip(&mut self, count: u32) -> Result<(), Error> {
-        let next = self.position + u64::from(count);
-        if next > self.end {
+        if self.position() + u64::from(count) > self.end {
             return Err(Error::Truncated);
         }
         if self.available < count {
             self.refill();
         }
-        self.position = next;
         self.window <<= count;
         self.available -= count;
         Ok(())
@@ -149,9 +146,6 @@ impl BitWriter {
     #[inline]
     pub(crate) fn put(&mut self, value: u32, bits: u32) {
         debug_assert!(self.count + bits <= 64 && (bits == 32 || value >> bits == 0));
-        if bits == 0 {
-            return;
-        }
         self.pending = (self.pending << bits) | u64::from(value);
         self.count += bits;
     }

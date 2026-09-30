@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "pbz2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bzip2",
  "eyre",
@@ -488,14 +488,13 @@ dependencies = [
  "md-5",
  "pbz2-core",
  "proc-macro2",
- "rayon",
  "syn 2.0.119",
  "thiserror",
 ]
 
 [[package]]
 name = "pbz2-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "bzip2",

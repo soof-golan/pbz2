@@ -8,17 +8,11 @@ use crate::level::Level;
 use crate::native::{Native, native};
 use crate::stream::Pulled;
 
-/// Scratch words [`Encoder`] needs for blocks of up to `block_bytes` bytes.
+/// Scratch words needed to encode a block at `level`.
 #[must_use]
-pub const fn encode_scratch_words(block_bytes: usize) -> usize {
-    compress::scratch_words(block_bytes)
+pub const fn encode_scratch_words(level: Level) -> usize {
+    compress::scratch_words(compress::block_limit(level))
 }
-
-/// Scratch words that are enough to encode at every level.
-pub const ENCODE_SCRATCH_WORDS: usize = encode_scratch_words(ENCODE_BUFFER_BYTES);
-
-/// An input buffer this large holds a whole block at every level.
-pub const ENCODE_BUFFER_BYTES: usize = compress::block_limit(Level::BEST);
 
 pub(crate) const fn stream_header(level: Level) -> u32 {
     u32::from_be_bytes([b'B', b'Z', b'h', level.digit()])
@@ -33,17 +27,10 @@ enum State {
     Finished,
 }
 
-/// A sequential bzip2 encoder that does no I/O and does not allocate.
+/// A sequential bzip2 encoder: push uncompressed bytes, pull compressed bytes.
 ///
-/// Push uncompressed bytes in with [`Encoder::push`], pull compressed bytes out with
-/// [`Encoder::pull`], and call [`Encoder::end_input`] once all input has been pushed.
-///
-/// The caller provides the storage: an input buffer that holds one block before it is
-/// compressed ([`ENCODE_BUFFER_BYTES`] fits the largest block, a smaller one makes smaller
-/// blocks), and scratch space of [`encode_scratch_words`] words for that block size
-/// ([`ENCODE_SCRATCH_WORDS`] is always enough).
-///
-/// The inner loops run in the [`Native`] backend.
+/// It needs an input buffer of [`Level::block_bytes`] (a smaller one makes smaller blocks)
+/// and a scratch space of [`encode_scratch_words`].
 pub struct Encoder<Buffer, Scratch, B = Native> {
     buffer: Buffer,
     scratch: Scratch,
@@ -60,13 +47,11 @@ pub struct Encoder<Buffer, Scratch, B = Native> {
 impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>>
     Encoder<Buffer, Scratch, Native>
 {
-    /// An encoder at `level` that uses `buffer` for input and `scratch` to sort blocks.
+    /// An encoder at `level` that runs in the [`Native`] backend.
     ///
     /// # Errors
     ///
-    /// [`Error::BufferTooSmall`] if the buffer holds fewer than 8 bytes, and
-    /// [`Error::ScratchTooSmall`] if the scratch space is smaller than the buffer's blocks
-    /// need.
+    /// [`Error::BufferTooSmall`] or [`Error::ScratchTooSmall`].
     pub fn new(level: Level, buffer: Buffer, scratch: Scratch) -> Result<Self, Error> {
         Self::with_backend(level, buffer, scratch, native())
     }
@@ -75,11 +60,11 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>>
 impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B: Backend>
     Encoder<Buffer, Scratch, B>
 {
-    /// Like [`Encoder::new`], with the inner loops run by `backend`.
+    /// An encoder at `level` that runs in `backend`.
     ///
     /// # Errors
     ///
-    /// See [`Encoder::new`].
+    /// [`Error::BufferTooSmall`] or [`Error::ScratchTooSmall`].
     pub fn with_backend(
         level: Level,
         buffer: Buffer,
@@ -88,7 +73,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
     ) -> Result<Self, Error> {
         let block_bytes = compress::usable_block_bytes(level, buffer.as_ref().len())
             .ok_or(Error::BufferTooSmall)?;
-        if scratch.as_ref().len() < encode_scratch_words(block_bytes) {
+        if scratch.as_ref().len() < compress::scratch_words(block_bytes) {
             return Err(Error::ScratchTooSmall);
         }
         Ok(Self {
@@ -105,8 +90,7 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         })
     }
 
-    /// Takes as much of `input` as fits into the current block and returns how many bytes
-    /// were taken. It takes nothing while a full block waits for [`Encoder::pull`].
+    /// Takes as much of `input` as fits and returns how many bytes were taken.
     pub fn push(&mut self, input: &[u8]) -> usize {
         if self.input_ended {
             return 0;
@@ -114,13 +98,12 @@ impl<Buffer: AsMut<[u8]> + AsRef<[u8]>, Scratch: AsMut<[u32]> + AsRef<[u32]>, B:
         self.builder.push(input, self.buffer.as_mut(), self.backend)
     }
 
-    /// Tells the encoder that all input has been pushed.
+    /// Says that all input has been pushed.
     pub const fn end_input(&mut self) {
         self.input_ended = true;
     }
 
-    /// Writes compressed bytes into `out`. A block is compressed once it is full or the
-    /// input has ended, so a call can take a while.
+    /// Writes compressed bytes into `out`, compressing a block when one is ready.
     pub fn pull(&mut self, out: &mut [u8]) -> Pulled {
         let mut written = 0;
         loop {

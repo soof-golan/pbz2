@@ -6,19 +6,14 @@
 //!
 //! bzip2 compresses data in independent blocks, so both directions can use every core:
 //!
-//! - Sequential: [`Decoder`] and [`Encoder`] are complete decoders and encoders you push
-//!   bytes into and pull bytes out of.
-//! - Parallel decoding: [`Scanner`] finds the 48-bit markers where blocks start,
-//!   [`decode_block_into`] decodes one block on any thread, and [`StreamChecker`] checks
-//!   the results in order. A false marker inside compressed data is detected, and the
-//!   block is decoded again over more data.
-//! - Parallel encoding: [`BlockSplitter`] splits data into blocks, [`encode_block`] or
-//!   [`encode_raw_block`] compresses one block on any thread, and [`StreamAssembler`]
-//!   joins them into one standard bzip2 stream.
+//! - Sequential: [`Decoder`] and [`Encoder`].
+//! - Parallel decoding: [`Scanner`] finds block markers, [`decode_block_into`] decodes a
+//!   block on any thread, and [`StreamChecker`] checks the results in order.
+//! - Parallel encoding: [`BlockSplitter`] splits data into blocks, [`encode_block`]
+//!   compresses one on any thread, and [`StreamAssembler`] joins them into a stream.
 //!
-//! The inner loops run in a [`Backend`] picked at compile time: [`Native`], which is SIMD
-//! with the `simd` feature and [`Scalar`] without it. The `_with` functions and
-//! `with_backend` constructors take another backend, for tests and benchmarks.
+//! Functions that run inner loops take a [`Backend`]; [`native`] is the best one the
+//! build target enables.
 #![no_std]
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -46,19 +41,15 @@ mod stream;
 mod tables;
 
 pub use assemble::{
-    BlockSplitter, EncodedBlock, InputBlock, RawBlock, StreamAssembler, encode_block,
-    encode_block_with, encode_raw_block, encode_raw_block_with, encoded_block_bytes,
+    BlockSplitter, EncodedBlock, InputBlock, RawBlock, StreamAssembler, code_runs, encode_block,
+    encoded_block_bytes,
 };
 #[cfg(feature = "simd")]
 pub use backend::Vectorized;
 pub use backend::{Backend, Scalar};
-pub use block::{
-    BLOCK_MAGIC, BLOCK_SIZE_STEP, BlockOutput, END_MAGIC, SCRATCH_WORDS, decode_block_into,
-    decode_block_into_with, decode_scratch_words,
-};
+pub use block::{BlockOutput, decode_block_into, decode_scratch_words};
 pub use checker::StreamChecker;
-pub use crc::combine as combine_crc;
-pub use encoder::{ENCODE_BUFFER_BYTES, ENCODE_SCRATCH_WORDS, Encoder, encode_scratch_words};
+pub use encoder::{Encoder, encode_scratch_words};
 pub use error::Error;
 #[cfg(feature = "simd")]
 pub use fearless_simd;

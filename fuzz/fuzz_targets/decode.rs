@@ -4,12 +4,13 @@ use std::io::{Cursor, Read};
 
 use libfuzzer_sys::fuzz_target;
 use pbz2::ParallelDecoder;
-use pbz2::pbz2_core::{Decoder, MAX_COMPRESSED_BLOCK_BYTES, Pulled, SCRATCH_WORDS};
+use pbz2::Level;
+use pbz2::pbz2_core::{Decoder, MAX_COMPRESSED_BLOCK_BYTES, Pulled, decode_scratch_words};
 
 fn sequential(input: &[u8], piece_bytes: usize) -> Option<Vec<u8>> {
     let mut decoder = Decoder::new(
         vec![0u8; MAX_COMPRESSED_BLOCK_BYTES],
-        vec![0u32; SCRATCH_WORDS],
+        vec![0u32; decode_scratch_words(Level::BEST)],
     );
     let mut pieces = input.chunks(piece_bytes);
     let mut pending: &[u8] = &[];

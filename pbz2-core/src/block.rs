@@ -4,21 +4,13 @@ use crate::bits::BitReader;
 use crate::crc;
 use crate::huffman::{MAX_ALPHABET, MAX_CODE_LENGTH, Table};
 use crate::level::Level;
-use crate::native::native;
 use crate::randomized;
 
-/// The 48-bit marker that starts every bzip2 block.
-pub const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
-/// The 48-bit marker that ends every bzip2 stream.
-pub const END_MAGIC: u64 = 0x1772_4538_5090;
-/// How many bytes a block may hold for each step of the stream's block size (1 to 9).
-pub const BLOCK_SIZE_STEP: usize = 100_000;
-/// Scratch words needed to decode any block.
-pub const SCRATCH_WORDS: usize = decode_scratch_words(Level::BEST);
+pub(crate) const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
+pub(crate) const END_MAGIC: u64 = 0x1772_4538_5090;
+pub(crate) const BLOCK_SIZE_STEP: usize = 100_000;
 
-/// Scratch words needed to decode a block at `level`: one word for each byte the block may
-/// hold, for the inverse transform, a quarter word per byte for its output, and 129 pages
-/// of 1024 words for walking the transform in pieces.
+/// Scratch words needed to decode a block at `level`.
 #[must_use]
 pub const fn decode_scratch_words(level: Level) -> usize {
     let block = level.block_bytes();
@@ -32,11 +24,9 @@ const GROUP_SIZE: usize = 50;
 const MAX_SELECTORS: usize = 18002;
 const LONGEST_RUN_WEIGHT: u32 = 2 * 1024 * 1024;
 const SYMBOLS_PER_FILL: usize = 2;
+const WRITTEN_AHEAD: usize = 8;
 
-/// The state of one decoded block while its bytes are being read out.
-///
-/// It does not hold the scratch space; pass the same scratch to [`BlockOutput::read`]
-/// that was given to [`decode_block_into`].
+/// A decoded block whose bytes are read out of the scratch given to [`decode_block_into`].
 #[derive(Debug, Clone)]
 pub struct BlockOutput {
     bytes_at: u32,
@@ -50,6 +40,7 @@ pub struct BlockOutput {
     crc: u32,
     stored_crc: u32,
     block_length: u32,
+    moved_past: u32,
     end_bit: u64,
 }
 
@@ -107,12 +98,28 @@ impl BlockOutput {
             if self.run == 0 {
                 same &= !0x80;
             }
-            let carried = u64::from(self.run.saturating_sub(1));
-            let completes_a_run = same & (same << 8) & (same << 16) != 0
-                || (carried == 2 && same & 0x80 != 0)
-                || (carried == 1 && same & 0x8080 == 0x8080);
-            if completes_a_run {
-                break;
+            let carried = self.run.saturating_sub(1);
+            let ends = (same & (same << 8) & (same << 16))
+                | (same & 0x80 & 0u64.wrapping_sub(u64::from(carried == 2)))
+                | (same & (same << 8) & 0x8000 & 0u64.wrapping_sub(u64::from(carried == 1)));
+            if ends != 0 {
+                let last = (ends.trailing_zeros() >> 3) as usize;
+                if last == 7 {
+                    break;
+                }
+                let byte = (bytes >> (last * 8)) as u8;
+                let repeats = usize::from((bytes >> ((last + 1) * 8)) as u8);
+                if written + last + 1 + repeats > out.len() {
+                    break;
+                }
+                out[written..written + 8].copy_from_slice(&bytes.to_le_bytes());
+                written += last + 1;
+                out[written..written + repeats].fill(byte);
+                written += repeats;
+                self.position += last as u32 + 2;
+                self.last = byte;
+                self.run = 0;
+                continue;
             }
             out[written..written + 8].copy_from_slice(&bytes.to_le_bytes());
             written += 8;
@@ -173,8 +180,7 @@ impl BlockOutput {
     ///
     /// # Errors
     ///
-    /// [`Error::Truncated`] if bytes are still unread, [`Error::BlockCrcMismatch`] if the
-    /// checksum does not match.
+    /// [`Error::Truncated`] or [`Error::BlockCrcMismatch`].
     pub const fn finish(&self) -> Result<u32, Error> {
         if !self.is_finished() {
             return Err(Error::Truncated);
@@ -185,36 +191,34 @@ impl BlockOutput {
         Ok(self.stored_crc)
     }
 
-    /// The bit right after the block, where the next block or end marker starts.
+    /// The bit right after the block.
     #[must_use]
     pub const fn end_bit(&self) -> u64 {
         self.end_bit
     }
 
-    /// How many symbols the block holds before its last run-length step, which is what
-    /// the stream's block size limits.
+    /// The block's length before its last run-length step.
     #[must_use]
     pub const fn block_length(&self) -> u32 {
-        self.block_length
+        self.block_length + self.moved_past
     }
 
-    /// How many words [`BlockOutput::move_bytes`] needs: the block's bytes before its last
-    /// run-length step, four to a word, at most a quarter of the block size.
+    /// How many words [`BlockOutput::move_bytes`] needs.
     #[must_use]
     pub const fn byte_words(&self) -> usize {
-        (self.block_length as usize + 3) >> 2
+        ((self.block_length as usize + 3) >> 2) - (self.position as usize >> 2)
     }
 
-    /// Copies the block's bytes out of `scratch` into `into` and returns the output that
-    /// reads them from `into`, so `scratch` is free to decode another block. `into` must
-    /// hold [`BlockOutput::byte_words`] words.
+    /// Moves the unread bytes from `scratch` into `into` and returns the output that reads
+    /// them there, freeing `scratch`.
     ///
     /// # Errors
     ///
-    /// [`Error::ScratchTooSmall`] if `scratch` or `into` is too small.
+    /// [`Error::ScratchTooSmall`].
     pub fn move_bytes(&self, scratch: &[u32], into: &mut [u32]) -> Result<Self, Error> {
         let words = self.byte_words();
-        let from = self.bytes_at as usize;
+        let skipped = self.position & !3;
+        let from = self.bytes_at as usize + (skipped as usize >> 2);
         let source = scratch
             .get(from..from + words)
             .ok_or(Error::ScratchTooSmall)?;
@@ -223,6 +227,9 @@ impl BlockOutput {
             .copy_from_slice(source);
         Ok(Self {
             bytes_at: 0,
+            position: self.position - skipped,
+            block_length: self.block_length - skipped,
+            moved_past: self.moved_past + skipped,
             ..self.clone()
         })
     }
@@ -233,39 +240,19 @@ impl BlockOutput {
     }
 }
 
-/// Decodes the block whose marker starts at `start_bit` of `bytes`, reading no further
-/// than `end_bit`, and returns the state for reading its bytes out of `scratch` with
-/// [`BlockOutput::read`].
-///
-/// `level` is the block size from the stream header. The scratch space must hold
-/// [`decode_scratch_words`] words; [`SCRATCH_WORDS`] is always enough.
+/// Decodes the block whose marker is at `start_bit` of `bytes`, reading no further than
+/// `end_bit`, into `scratch` of [`decode_scratch_words`] words.
 ///
 /// # Errors
 ///
-/// [`Error::Truncated`] if the block does not end before `end_bit`, and the other
-/// variants of [`Error`] for damaged data.
-pub fn decode_block_into(
-    bytes: &[u8],
-    start_bit: u64,
-    end_bit: u64,
-    level: Level,
-    scratch: &mut [u32],
-) -> Result<BlockOutput, Error> {
-    decode_block_into_with(bytes, start_bit, end_bit, level, scratch, native())
-}
-
-/// Like [`decode_block_into`], with the inner loops run by `backend`.
-///
-/// # Errors
-///
-/// See [`decode_block_into`].
-pub fn decode_block_into_with<B: Backend>(
-    bytes: &[u8],
-    start_bit: u64,
-    end_bit: u64,
-    level: Level,
-    scratch: &mut [u32],
+/// [`Error::Truncated`] if the block does not end before `end_bit`, or damaged data.
+pub fn decode_block_into<B: Backend>(
     backend: B,
+    bytes: &[u8],
+    start_bit: u64,
+    end_bit: u64,
+    level: Level,
+    scratch: &mut [u32],
 ) -> Result<BlockOutput, Error> {
     backend.run(
         #[inline(always)]
@@ -315,8 +302,8 @@ fn link(tt: &mut [u32]) {
 
 const STARTS: usize = 128;
 const LANES: usize = 16;
-const PAGE_WORDS: usize = 1024;
-const MOST_PAGES: usize = 512;
+const PAGE_WORDS: usize = 256;
+const MOST_PAGES: usize = 1024;
 const START_FLAG: u32 = 1 << 31;
 const PIECES_FROM: usize = 1 << 16;
 
@@ -384,19 +371,19 @@ struct Walk {
     row: usize,
     page: usize,
     offset: usize,
-    word: u32,
-    filled: u32,
 }
 
+const PAGE_BYTES: usize = PAGE_WORDS * 4;
+
 struct Pages<'a> {
-    words: &'a mut [u32],
+    bytes: &'a mut [u8],
     next: [u16; MOST_PAGES],
     used: usize,
 }
 
 impl Pages<'_> {
     fn take(&mut self) -> Option<usize> {
-        if self.used == MOST_PAGES || (self.used + 1) * PAGE_WORDS > self.words.len() {
+        if self.used == MOST_PAGES || (self.used + 1) * PAGE_BYTES > self.bytes.len() {
             return None;
         }
         self.used += 1;
@@ -405,41 +392,31 @@ impl Pages<'_> {
 
     #[inline(always)]
     fn put(&mut self, walk: &mut Walk, byte: u32) -> Option<()> {
-        walk.word |= (byte & 0xff) << walk.filled;
-        walk.filled += 8;
-        if walk.filled == 32 {
-            self.words[walk.page * PAGE_WORDS + walk.offset] = walk.word;
-            walk.word = 0;
-            walk.filled = 0;
-            walk.offset += 1;
-            if walk.offset == PAGE_WORDS {
-                let page = self.take()?;
-                self.next[walk.page] = page as u16;
-                walk.page = page;
-                walk.offset = 0;
-            }
+        self.bytes[walk.page * PAGE_BYTES + walk.offset] = byte as u8;
+        walk.offset += 1;
+        if walk.offset == PAGE_BYTES {
+            let page = self.take()?;
+            self.next[walk.page] = page as u16;
+            walk.page = page;
+            walk.offset = 0;
         }
         Some(())
-    }
-
-    fn finish(&mut self, walk: &Walk) {
-        if walk.filled > 0 {
-            self.words[walk.page * PAGE_WORDS + walk.offset] = walk.word;
-        }
     }
 
     fn copy(&self, piece: &Piece, stream: &mut Stream<'_>) {
         let mut page = piece.first_page;
         let mut left = piece.length;
         while left > 0 {
-            let bytes = left.min(PAGE_WORDS << 2);
-            let words = &self.words[page * PAGE_WORDS..page * PAGE_WORDS + ((bytes + 3) >> 2)];
-            let (whole, rest) = words.split_at(bytes >> 2);
+            let bytes = left.min(PAGE_BYTES);
+            let (whole, rest) =
+                self.bytes[page * PAGE_BYTES..page * PAGE_BYTES + bytes].as_chunks::<4>();
             for word in whole {
-                stream.push(*word, 32);
+                stream.push(u32::from_le_bytes(*word), 32);
             }
-            if let Some(word) = rest.first() {
-                stream.push(*word, ((bytes & 3) << 3) as u32);
+            if !rest.is_empty() {
+                let mut word = [0u8; 4];
+                word[..rest.len()].copy_from_slice(rest);
+                stream.push(u32::from_le_bytes(word), (rest.len() << 3) as u32);
             }
             left -= bytes;
             page = usize::from(self.next[page]);
@@ -462,7 +439,7 @@ fn walk_in_pieces(tt: &mut [u32], arena: &mut [u32], origin: usize) -> Option<()
         }
     }
     let mut pages = Pages {
-        words: arena,
+        bytes: bytemuck::cast_slice_mut(arena),
         next: [0; MOST_PAGES],
         used: 0,
     };
@@ -502,7 +479,6 @@ fn walk_in_pieces(tt: &mut [u32], arena: &mut [u32], origin: usize) -> Option<()
                 continue;
             }
             pieces[walk.piece].stop = walk.row;
-            pages.finish(walk);
             if waiting < count {
                 lanes[lane] = begin(&mut pages, &mut pieces, waiting)?;
                 waiting += 1;
@@ -623,13 +599,14 @@ fn decode<B: Backend>(
         }
     }
     let selector_count = selector_count.min(MAX_SELECTORS);
-    let mut order = [0u8, 1, 2, 3, 4, 5];
+    let mut order = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 0, 0]);
     for selector in &mut selectors[..selector_count] {
-        let position = *selector as usize;
-        let group = order[position];
-        order.copy_within(0..position, 1);
-        order[0] = group;
-        *selector = u32::from(group);
+        let shift = 8 * (*selector).min(MAX_GROUPS as u32 - 1);
+        let group = (order >> shift) & 0xff;
+        let before = order & ((1 << shift) - 1);
+        let after = order & !((1 << (shift + 8)) - 1);
+        order = after | (before << 8) | group;
+        *selector = group as u32;
     }
 
     let mut tables: [Option<Table>; MAX_GROUPS] = [const { None }; MAX_GROUPS];
@@ -659,7 +636,6 @@ fn decode<B: Backend>(
     let mut recent = Recent::new();
     let in_register = backend.front_in_register();
     let mut length = 0usize;
-    let mut run = 0u32;
     let mut weight = 1u32;
     let mut ended = false;
     for selector in &selectors[..selector_count] {
@@ -670,34 +646,37 @@ fn decode<B: Backend>(
             if step % SYMBOLS_PER_FILL == 0 {
                 bits.fill();
             }
-            let symbol = table.decode(&mut bits)?;
-            if symbol <= RUN_B {
-                if weight >= LONGEST_RUN_WEIGHT {
-                    return Err(Error::RunTooLong);
-                }
-                run += weight << symbol;
-                weight <<= 1;
-                continue;
-            }
-            if run > 0 {
-                let byte = byte_of[usize::from(recent.first_of(in_register))];
-                let end = length + run as usize;
-                tt.get_mut(length..end)
-                    .ok_or(Error::BlockTooLarge)?
-                    .fill(u32::from(byte));
-                length = end;
-                run = 0;
-                weight = 1;
-            }
+            let symbol = table
+                .decode(&mut bits)
+                .map_err(|problem| bits.check_end().err().unwrap_or(problem))?;
             if symbol == end_of_block {
                 ended = true;
                 break;
             }
-            let slot = tt.get_mut(length).ok_or(Error::BlockTooLarge)?;
-            let index = recent.take_position(backend, usize::from(symbol - 1), in_register);
-            *slot = u32::from(byte_of[usize::from(index)]);
-            length += 1;
+            let is_run = symbol <= RUN_B;
+            if is_run & (weight >= LONGEST_RUN_WEIGHT) {
+                bits.check_end()?;
+                return Err(Error::RunTooLong);
+            }
+            let run = u32::from(is_run).wrapping_neg();
+            let count = ((weight << (symbol & 1)) & run) | (1 & !run);
+            weight = ((weight << 1) & run) | (1 & !run);
+            let index = recent.take_position(backend, usize::from(symbol.max(1) - 1), in_register);
+            let byte = u32::from(byte_of[usize::from(index)]);
+            let end = length + count as usize;
+            match tt.get_mut(length..length + WRITTEN_AHEAD) {
+                Some(ahead) if end <= length + WRITTEN_AHEAD => ahead.fill(byte),
+                _ => match tt.get_mut(length..end) {
+                    Some(span) => span.fill(byte),
+                    None => {
+                        bits.check_end()?;
+                        return Err(Error::BlockTooLarge);
+                    }
+                },
+            }
+            length = end;
         }
+        bits.check_end()?;
         if ended {
             break;
         }
@@ -724,6 +703,7 @@ fn decode<B: Backend>(
         crc: crc::START,
         stored_crc,
         block_length: length as u32,
+        moved_past: 0,
         end_bit: bits.position(),
     })
 }

@@ -35,7 +35,6 @@ pbz2-core.workspace = true
 eyre = { workspace = true, optional = true }
 fearless_simd = { workspace = true, optional = true, features = ["std"] }
 lexopt = { workspace = true, optional = true }
-rayon.workspace = true
 thiserror = { workspace = true, features = ["std"] }
 
 [dev-dependencies]

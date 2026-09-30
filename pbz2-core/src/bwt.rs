@@ -74,7 +74,10 @@ fn common_length(text: &[u8], mut first: usize, mut second: usize) -> usize {
 
 fn least_rotation_among_runs(text: &[u8]) -> Option<Rotation> {
     let n = text.len();
-    let smallest = *text.iter().min()?;
+    if text.is_empty() {
+        return None;
+    }
+    let smallest = text.iter().copied().fold(u8::MAX, u8::min);
     let Some(anchor) = text.iter().position(|byte| *byte != smallest) else {
         return Some(Rotation {
             start: 0,
@@ -115,6 +118,20 @@ fn least_rotation_among_runs(text: &[u8]) -> Option<Rotation> {
                 best = start;
                 repeats_itself = false;
             } else {
+                let word = |at: usize| {
+                    text.get(at + run..at + run + 8)
+                        .and_then(|bytes| bytes.first_chunk::<8>())
+                        .map(|bytes| u64::from_be_bytes(*bytes))
+                };
+                if let (Some(here), Some(there)) = (word(start), word(best))
+                    && here != there
+                {
+                    if here < there {
+                        best = start;
+                        repeats_itself = false;
+                    }
+                    continue;
+                }
                 let common = common_length(text, start, best);
                 budget = budget.checked_sub(common + 1)?;
                 if common == n {
@@ -399,12 +416,34 @@ mod tests {
 
     #[test]
     fn symbols_match_sorted_rotations() {
+        assert_symbols_match_sorted_rotations(crate::Scalar);
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    #[test]
+    fn vectorized_symbols_match_sorted_rotations() {
+        let neon = fearless_simd::Level::new().as_neon();
+        assert!(neon.is_some(), "every aarch64 core has NEON");
+        if let Some(neon) = neon {
+            assert_symbols_match_sorted_rotations(crate::Vectorized(neon));
+        }
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn vectorized_symbols_match_sorted_rotations() {
+        if let Some(sse) = fearless_simd::Level::new().as_sse4_2() {
+            assert_symbols_match_sorted_rotations(crate::Vectorized(sse));
+        }
+    }
+
+    fn assert_symbols_match_sorted_rotations<B: Backend>(backend: B) {
         for text in texts() {
             let rows = rotations_sorted(&text);
             let last: Vec<u8> = rows.iter().map(|row| row[text.len() - 1]).collect();
             let mut block = text.clone();
             let mut scratch = vec![0; scratch_words(text.len())];
-            let symbols = symbols(crate::Scalar, &mut block, &mut scratch);
+            let symbols = symbols(backend, &mut block, &mut scratch);
             assert_eq!(
                 rows[symbols.origin as usize], text,
                 "origin row for {text:?}"

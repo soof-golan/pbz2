@@ -4,7 +4,7 @@ use crate::bits::BitReader;
 pub(crate) const MAX_ALPHABET: usize = 258;
 pub(crate) const MAX_CODE_LENGTH: u8 = 20;
 const LIMIT_SLOTS: usize = 23;
-const FAST_BITS: u32 = 10;
+const FAST_BITS: u32 = 11;
 
 const FAST_ENTRIES: usize = 1 << FAST_BITS;
 
@@ -78,7 +78,7 @@ impl Table {
     pub(crate) fn decode(&self, bits: &mut BitReader<'_>) -> Result<u16, Error> {
         let entry = self.fast[bits.peek_filled(FAST_BITS) as usize & (FAST_ENTRIES - 1)];
         if entry != 0 {
-            bits.skip_filled(u32::from(entry & 0xf))?;
+            bits.skip_filled(u32::from(entry & 0xf));
             return Ok(entry >> 4);
         }
         self.codes.decode_long(bits)
@@ -161,14 +161,66 @@ pub(crate) fn code_lengths(frequencies: &[u32], lengths: &mut [u8]) {
         *leaf = u64::from(frequencies[usize::from(*symbol)].max(1));
     }
     let leaves = &leaves[..n];
+    let mut per_length = [0u16; MAX_ENCODE_LENGTH + 1];
+    if !huffman_length_counts(leaves, &mut per_length) {
+        package_merge_counts(leaves, &mut per_length);
+    }
+    let mut symbols = order.iter();
+    for (length, count) in per_length.iter().enumerate().rev() {
+        for symbol in symbols.by_ref().take(usize::from(*count)) {
+            lengths[usize::from(*symbol)] = length as u8;
+        }
+    }
+}
 
-    let mut current = [0u64; LIST_SLOTS];
-    current[..n].copy_from_slice(leaves);
+fn huffman_length_counts(leaves: &[u64], per_length: &mut [u16; MAX_ENCODE_LENGTH + 1]) -> bool {
+    let n = leaves.len();
+    let mut weight = [0u64; LIST_SLOTS];
+    let mut parent = [0u16; LIST_SLOTS];
+    let (mut leaf, mut node) = (0, n);
+    for next in n..2 * n - 1 {
+        let mut pick = || {
+            if leaf < n && (node == next || leaves[leaf] <= weight[node]) {
+                leaf += 1;
+                (leaf - 1, leaves[leaf - 1])
+            } else {
+                node += 1;
+                (node - 1, weight[node - 1])
+            }
+        };
+        let (a, first) = pick();
+        let (b, second) = pick();
+        weight[next] = first + second;
+        parent[a] = next as u16;
+        parent[b] = next as u16;
+    }
+    let mut depth = [0u8; LIST_SLOTS];
+    for index in (0..2 * n - 2).rev() {
+        depth[index] = depth[usize::from(parent[index])] + 1;
+        if usize::from(depth[index]) > MAX_ENCODE_LENGTH {
+            return false;
+        }
+    }
+    for depth in &depth[..n] {
+        per_length[usize::from(*depth)] += 1;
+    }
+    true
+}
+
+fn package_merge_counts(leaves: &[u64], per_length: &mut [u16; MAX_ENCODE_LENGTH + 1]) {
+    let n = leaves.len();
+    let mut lists = [[0u64; LIST_SLOTS]; 2];
+    lists[0][..n].copy_from_slice(leaves);
     let mut current_length = n;
     let mut leaf_marks = [[0u64; MARK_WORDS]; MAX_ENCODE_LENGTH];
-    for marks in &mut leaf_marks[1..] {
+    for (level, marks) in leaf_marks[1..].iter_mut().enumerate() {
         let packages = current_length >> 1;
-        let mut merged = [0u64; LIST_SLOTS];
+        let (low, high) = lists.split_at_mut(1);
+        let (current, merged) = if level & 1 == 0 {
+            (&low[0], &mut high[0])
+        } else {
+            (&high[0], &mut low[0])
+        };
         let (mut leaf, mut package) = (0, 0);
         for (slot, weight) in merged[..n + packages].iter_mut().enumerate() {
             let package_weight =
@@ -185,23 +237,27 @@ pub(crate) fn code_lengths(frequencies: &[u32], lengths: &mut [u8]) {
                 }
             }
         }
-        current = merged;
         current_length = n + packages;
     }
 
-    lengths[..n].fill(0);
+    let mut at_least = [0usize; MAX_ENCODE_LENGTH + 1];
     let mut take = 2 * n - 2;
-    for marks in leaf_marks[1..].iter().rev() {
-        let leaves_taken = (0..take)
-            .filter(|slot| marks[slot >> 6] >> (slot & 63) & 1 == 1)
-            .count();
-        for symbol in &order[..leaves_taken] {
-            lengths[usize::from(*symbol)] += 1;
-        }
+    for (length, marks) in leaf_marks[1..].iter().rev().enumerate() {
+        let (whole, part) = (take >> 6, take & 63);
+        let leaves_taken = marks[..whole]
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>()
+            + marks
+                .get(whole)
+                .map_or(0, |word| (word & ((1 << part) - 1)).count_ones() as usize);
+        at_least[length + 1] = leaves_taken;
         take = 2 * (take - leaves_taken);
     }
-    for symbol in &order[..take] {
-        lengths[usize::from(*symbol)] += 1;
+    at_least[MAX_ENCODE_LENGTH] = take;
+    for length in 1..=MAX_ENCODE_LENGTH {
+        per_length[length] =
+            (at_least[length] - at_least.get(length + 1).copied().unwrap_or(0)) as u16;
     }
 }
 
@@ -248,6 +304,37 @@ mod tests {
     }
 
     #[test]
+    fn huffman_counts_match_package_merge_when_short_enough() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut compared = 0;
+        for case in 0..20_000 {
+            let n = 2 + (next() % 257) as usize;
+            let spread = [4, 64, 1 << 12, 1 << 20][case % 4];
+            let mut leaves: std::vec::Vec<u64> = (0..n).map(|_| 1 + next() % spread).collect();
+            if case % 3 == 0 {
+                for leaf in leaves.iter_mut().step_by(2) {
+                    *leaf = 1 + next() % 3;
+                }
+            }
+            leaves.sort_unstable();
+            let mut fast = [0u16; MAX_ENCODE_LENGTH + 1];
+            let mut merged = [0u16; MAX_ENCODE_LENGTH + 1];
+            if huffman_length_counts(&leaves, &mut fast) {
+                package_merge_counts(&leaves, &mut merged);
+                assert_eq!(fast, merged, "leaves {leaves:?}");
+                compared += 1;
+            }
+        }
+        assert!(compared > 10_000);
+    }
+
+    #[test]
     fn code_lengths_are_limited_and_complete() {
         let mut fibonacci = [0u32; 40];
         fibonacci[0] = 1;
@@ -283,7 +370,9 @@ mod tests {
         let mut bits = BitReader::new(&[0b0101_1011, 0b1000_0000], 0, 9);
         let symbols: [u16; 4] = core::array::from_fn(|_| table.decode(&mut bits).unwrap_or(99));
         assert_eq!(symbols, [1, 0, 2, 3]);
-        assert_eq!(table.decode(&mut bits), Err(Error::Truncated));
+        assert_eq!(bits.check_end(), Ok(()));
+        let _ = table.decode(&mut bits);
+        assert_eq!(bits.check_end(), Err(Error::Truncated));
     }
 
     #[test]

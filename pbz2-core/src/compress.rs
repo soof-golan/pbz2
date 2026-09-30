@@ -218,6 +218,41 @@ impl BlockBuilder {
         (self.run_byte, self.run_length as usize)
     }
 
+    #[inline(always)]
+    fn copy_short_runs<O: Rle1Output + ?Sized, B: Backend>(
+        &mut self,
+        backend: B,
+        input: &[u8],
+        block: &mut O,
+    ) -> usize {
+        let pending = usize::from(self.run_length);
+        if !(1..=3).contains(&pending) {
+            return 0;
+        }
+        let room = self.limit.saturating_sub(self.filled + pending) / 16;
+        let (chunks, _) = input.as_chunks::<16>();
+        let mut taken = 0;
+        for chunk in chunks.iter().take(room) {
+            let pending = usize::from(self.run_length);
+            let mask = backend.equal_to_previous(chunk, self.run_byte);
+            let equal = (u32::from(mask) << 2) | [0b00, 0b10, 0b11][pending - 1];
+            if equal & (equal << 1) & (equal << 2) != 0 {
+                break;
+            }
+            block.run(self.filled, self.run_byte, pending as u16);
+            let (low, high) = chunk.split_at(8);
+            block.literals(self.filled + pending, low.try_into().unwrap_or([0; 8]));
+            block.literals(self.filled + pending + 8, high.try_into().unwrap_or([0; 8]));
+            let trailing = 1 + mask.leading_ones() as usize;
+            self.filled += pending + 16 - trailing;
+            self.run_byte = chunk[15];
+            self.run_length = trailing as u16;
+            taken += 16;
+        }
+        taken
+    }
+
+    #[inline(always)]
     fn copy_literals<O: Rle1Output + ?Sized>(&mut self, input: &[u8], block: &mut O) -> usize {
         let (chunks, _) = input.as_chunks::<8>();
         let mut taken = 0;
@@ -239,9 +274,41 @@ impl BlockBuilder {
         taken
     }
 
-    fn count_chunks<B: Backend>(&mut self, backend: B, input: &[u8]) -> usize {
-        let (chunks, _) = input.as_chunks::<16>();
+    #[inline(always)]
+    fn count_without_runs<B: Backend>(&mut self, backend: B, input: &[u8]) -> usize {
+        let (blocks, _) = input.as_chunks::<64>();
         let mut taken = 0;
+        for block in blocks {
+            let pending = self.run_length;
+            if pending == 0 || pending > 3 {
+                break;
+            }
+            let (chunks, _) = block.as_chunks::<16>();
+            let mut previous = self.run_byte;
+            let mut equal = 0u64;
+            for (quarter, chunk) in chunks.iter().enumerate() {
+                equal |= u64::from(backend.equal_to_previous(chunk, previous)) << (quarter * 16);
+                previous = chunk[15];
+            }
+            let carried = ((1u128 << (pending - 1)) - 1) << (4 - pending);
+            let pairs = (u128::from(equal) << 3) | carried;
+            let run_length = equal.leading_ones() as u16 + 1;
+            let flushed = 64 + usize::from(pending) - usize::from(run_length);
+            if pairs & (pairs >> 1) & (pairs >> 2) != 0 || self.filled + flushed > self.limit {
+                break;
+            }
+            self.filled += flushed;
+            self.run_length = run_length;
+            self.run_byte = previous;
+            taken += 64;
+        }
+        taken
+    }
+
+    #[inline(always)]
+    fn count_chunks<B: Backend>(&mut self, backend: B, input: &[u8]) -> usize {
+        let mut taken = self.count_without_runs(backend, input);
+        let (chunks, _) = input[taken..].as_chunks::<16>();
         for chunk in chunks {
             let pending = self.run_length;
             if pending == 0 || LONGEST_RUN - 16 <= pending {
@@ -264,6 +331,7 @@ impl BlockBuilder {
         taken
     }
 
+    #[inline(always)]
     pub(crate) fn push<O: Rle1Output + ?Sized, B: Backend>(
         &mut self,
         input: &[u8],
@@ -277,8 +345,11 @@ impl BlockBuilder {
         while taken < input.len() {
             if !O::COPIES {
                 taken += self.count_chunks(backend, &input[taken..]);
-            } else if self.run_length == 1 {
-                taken += self.copy_literals(&input[taken..], block);
+            } else {
+                taken += self.copy_short_runs(backend, &input[taken..], block);
+                if self.run_length == 1 {
+                    taken += self.copy_literals(&input[taken..], block);
+                }
             }
             if taken == input.len() {
                 break;
@@ -327,6 +398,10 @@ impl BlockBuilder {
         self.full = false;
         taken
     }
+}
+
+fn counts_of(lanes: &[[u32; MAX_ALPHABET]; COUNT_LANES]) -> [u32; MAX_ALPHABET] {
+    core::array::from_fn(|symbol| lanes.iter().map(|lane| lane[symbol]).sum())
 }
 
 fn tally(lanes: &mut [[u32; MAX_ALPHABET]; COUNT_LANES], chunk: &[u16], step: u32) {
@@ -399,18 +474,7 @@ impl BlockCode {
         self.header_at = block.len() + 1;
         let (low, header) = scratch.split_at_mut(self.header_at);
         let coded = self.symbols(low);
-        self.choose_tables(coded, &symbols.frequencies);
-        let symbol_bits: usize = coded
-            .chunks(GROUP_SIZE)
-            .zip(&self.selectors)
-            .map(|(chunk, selector)| {
-                let lengths = &self.lengths[usize::from(*selector)];
-                chunk
-                    .iter()
-                    .map(|symbol| usize::from(lengths[*symbol as usize]))
-                    .sum::<usize>()
-            })
-            .sum();
+        let symbol_bits = self.choose_tables(coded, &symbols.frequencies);
         let header = bytemuck::cast_slice_mut(header);
         let mut starts = core::array::from_fn(|table| self.lengths[table][0]);
         let padding = (self.write_header(&starts, header) + symbol_bits).wrapping_neg() & 7;
@@ -460,14 +524,17 @@ impl BlockCode {
             ((self.groups as u32) << 15) | self.selector_count as u32,
             18,
         );
-        let mut order = [0u8, 1, 2, 3, 4, 5];
+        const LANE_ONES: u64 = u64::MAX / 0xff;
+        let mut order = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 0xff, 0xff]);
         for selector in &self.selectors[..self.selector_count] {
-            let position = order
-                .iter()
-                .position(|group| group == selector)
-                .unwrap_or(0);
-            order[..=position].rotate_right(1);
-            put((2 << position) - 2, position as u32 + 1);
+            let difference = order ^ (u64::from(*selector) * LANE_ONES);
+            let equal = difference.wrapping_sub(LANE_ONES) & !difference & (LANE_ONES << 7);
+            let position = (equal.trailing_zeros() / 8).min(MAX_GROUPS as u32 - 1);
+            let shift = 8 * position;
+            let before = order & ((1 << shift) - 1);
+            let after = order & !((1 << (shift + 8)) - 1);
+            order = after | (before << 8) | u64::from(*selector);
+            put((2 << position) - 2, position + 1);
         }
         for (lengths, start) in self.lengths[..self.groups].iter().zip(starts) {
             let mut length = *start;
@@ -490,7 +557,7 @@ impl BlockCode {
         bits
     }
 
-    fn choose_tables(&mut self, symbols: &[u16], frequencies: &[u32; MAX_ALPHABET]) {
+    fn choose_tables(&mut self, symbols: &[u16], frequencies: &[u32; MAX_ALPHABET]) -> usize {
         let alphabet = self.alphabet;
         let groups = match symbols.len() {
             0..200 => 2,
@@ -547,14 +614,23 @@ impl BlockCode {
                 break;
             }
             for (lengths, lanes) in self.lengths[..groups].iter_mut().zip(&lanes) {
-                let counts: [u32; MAX_ALPHABET] =
-                    core::array::from_fn(|symbol| lanes.iter().map(|lane| lane[symbol]).sum());
-                code_lengths(&counts[..alphabet], &mut lengths[..alphabet]);
+                code_lengths(&counts_of(lanes)[..alphabet], &mut lengths[..alphabet]);
             }
         }
         for (codes, lengths) in self.codes[..groups].iter_mut().zip(&self.lengths) {
             canonical_codes(&lengths[..alphabet], &mut codes[..alphabet]);
         }
+        self.lengths[..groups]
+            .iter()
+            .zip(&lanes)
+            .map(|(lengths, lanes)| {
+                counts_of(lanes)[..alphabet]
+                    .iter()
+                    .zip(lengths)
+                    .map(|(count, length)| *count as usize * usize::from(*length))
+                    .sum::<usize>()
+            })
+            .sum()
     }
 
     fn used_group(&self, group: usize) -> u32 {
@@ -576,18 +652,16 @@ impl BlockCode {
             let table = usize::from(self.selectors[group]);
             let (codes, lengths) = (&self.codes[table], &self.lengths[table]);
             let group_end = ((group + 1) * GROUP_SIZE).min(self.symbol_count);
-            for symbol in &symbols[index..group_end] {
-                if out.len() - *written < 8 {
-                    break;
-                }
+            let end = group_end.min(index + (out.len() - *written - 8) / 4 + 1);
+            for symbol in &symbols[index..end] {
                 let symbol = *symbol as usize;
                 writer.put(codes[symbol], u32::from(lengths[symbol]));
                 if writer.count() >= 32 {
                     writer.flush_word(&mut out[*written..]);
                     *written += 4;
                 }
-                index += 1;
             }
+            index = end;
         }
         index
     }
