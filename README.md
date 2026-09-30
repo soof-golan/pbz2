@@ -62,22 +62,22 @@ Apple M4, 10 cores:
 
 | | bzip2 | pbz2, 1 core | pbz2, all cores | lbzip2 | pbzip2 | 7-Zip |
 | --- | --- | --- | --- | --- | --- | --- |
-| Compress 300 MB tarball | 10.5 s | 6.1 s | 0.94 s | 1.04 s | 1.59 s | 19.1 s |
-| Decompress it | 3.9 s | 2.0 s | 0.33 s | 0.51 s | 3.8 s | 1.7 s |
-| Compress 126 MB Silesia | 5.6 s | 3.4 s | 0.51 s | 0.61 s | 0.81 s | 10.4 s |
-| Decompress it | 2.1 s | 0.96 s | 0.16 s | 0.29 s | 2.1 s | 0.97 s |
+| Compress 300 MB tarball | 10.9 s | 4.6 s | 0.73 s | 1.11 s | 1.70 s | 21.2 s |
+| Decompress it | 3.9 s | 1.5 s | 0.30 s | 0.54 s | 3.8 s | 1.7 s |
+| Compress 126 MB Silesia | 5.6 s | 2.4 s | 0.38 s | 0.62 s | 0.90 s | 11.5 s |
+| Decompress it | 2.1 s | 0.77 s | 0.17 s | 0.31 s | 2.1 s | 0.96 s |
 
 Intel i7-13700K, 24 threads, Linux, default build:
 
-| | bzip2 | pbz2, 1 core | pbz2, all cores | lbzip2 |
-| --- | --- | --- | --- | --- |
-| Compress 300 MB tarball | 10.3 s | 6.2 s | 0.47 s | 0.48 s |
-| Decompress it | 4.0 s | 2.0 s | 0.22 s | 0.27 s |
-| Compress 126 MB Silesia | 5.4 s | 3.4 s | 0.26 s | 0.28 s |
-| Decompress it | 2.1 s | 0.95 s | 0.12 s | 0.16 s |
+| | bzip2 | pbz2, 1 core | pbz2, all cores | lbzip2 | pbzip2 |
+| --- | --- | --- | --- | --- | --- |
+| Compress 300 MB tarball | 10.3 s | 4.5 s | 0.36 s | 0.47 s | 0.75 s |
+| Decompress it | 4.0 s | 1.5 s | 0.19 s | 0.27 s | 4.0 s |
+| Compress 126 MB Silesia | 5.4 s | 2.4 s | 0.20 s | 0.28 s | 0.39 s |
+| Decompress it | 2.1 s | 0.76 s | 0.11 s | 0.16 s | 2.1 s |
 
-Built with `-C target-cpu=native` (AVX2), pbz2 on one core takes 6.1 s, 1.9 s, 3.3 s
-and 0.92 s. pbzip2 decodes other tools' files
+Built with `-C target-cpu=native` (AVX2), pbz2 on one core takes 4.4 s, 1.5 s, 2.3 s
+and 0.76 s. pbzip2 decodes other tools' files
 on one thread. 7-Zip level 9 makes extra passes.
 
 ## Contributing
