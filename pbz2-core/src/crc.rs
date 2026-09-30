@@ -80,6 +80,8 @@ fn update_by_table(mut crc: u32, bytes: &[u8]) -> u32 {
 ))]
 mod folded {
     use super::{POLYNOMIAL, update_by_table};
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::{_mm_clmulepi64_si128, _mm_set_epi64x};
 
     const FOLD_BYTES: usize = 64;
     const LANE_BYTES: usize = 16;
@@ -121,7 +123,6 @@ mod folded {
     #[allow(unsafe_code)]
     #[inline(always)]
     fn carryless(a: u64, b: u64) -> u128 {
-        use core::arch::x86_64::{_mm_clmulepi64_si128, _mm_set_epi64x};
         unsafe {
             let product =
                 _mm_clmulepi64_si128(_mm_set_epi64x(0, a as i64), _mm_set_epi64x(0, b as i64), 0);

@@ -1,3 +1,6 @@
+#[cfg(feature = "simd")]
+use fearless_simd::{Select, SimdBase, SimdMask, u8x16};
+
 /// The code that runs the inner loops, picked at compile time.
 ///
 /// [`Scalar`] works everywhere. With the `simd` feature, [`Vectorized`] runs them with the
@@ -188,7 +191,6 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn equal_to_previous(self, bytes: &[u8; 16], previous: u8) -> u16 {
-        use fearless_simd::{SimdBase, SimdMask, u8x16};
         let simd = self.0;
         let values = u8x16::from_slice(simd, bytes);
         let before = u8x16::splat(simd, previous).slide::<15>(values);
@@ -197,7 +199,6 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn marker_pairs(self, bytes: &[u8; 17]) -> u16 {
-        use fearless_simd::{SimdBase, SimdMask, u8x16};
         let simd = self.0;
         let [first_low, first_high, second_low, second_high] =
             crate::scan::PAIR_NIBBLES.map(|table| u8x16::from_slice(simd, &table));
@@ -213,7 +214,6 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn move_to_front(self, recent: &mut [u8; 256], index: u8) -> usize {
-        use fearless_simd::{Select, SimdBase, SimdMask, u8x16};
         let simd = self.0;
         let wanted = u8x16::splat(simd, index);
         let mut carry = wanted;
@@ -237,7 +237,6 @@ impl<S: fearless_simd::Simd> Backend for Vectorized<S> {
 
     #[inline(always)]
     fn move_position_to_front(self, recent: &mut [u8; 256], position: usize) -> u8 {
-        use fearless_simd::{Select, SimdBase, u8x16};
         let simd = self.0;
         let value = recent[position];
         let chunks = if position < NEAR_POSITIONS {

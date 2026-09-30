@@ -1,8 +1,14 @@
 use std::fs;
+#[cfg(unix)]
+use std::fs::{FileTimes, Permissions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, SystemTime};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_pbz2");
 
@@ -127,10 +133,6 @@ fn keep_leaves_input() {
 #[cfg(unix)]
 #[test]
 fn mode_and_times_are_copied_both_ways() {
-    use std::fs::{FileTimes, Permissions};
-    use std::os::unix::fs::PermissionsExt;
-    use std::time::{Duration, SystemTime};
-
     let folder = Folder::new("attributes");
     let path = folder.write("a", b"attributes");
     let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_934_240);

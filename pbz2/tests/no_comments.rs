@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use proc_macro2::{LineColumn, TokenStream, TokenTree};
 use syn::visit::{self, Visit};
-use syn::{Attribute, Fields, ImplItem, Item, TraitItem, Visibility};
+use syn::{Attribute, Block, Fields, ImplItem, Item, Stmt, TraitItem, Visibility};
 
 fn rust_files_in(folder: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(folder) else {
@@ -188,6 +188,48 @@ fn docs_off_the_public_interface(path: &Path, text: &str) -> Vec<usize> {
         .difference(&allowed)
         .map(|(line, _)| *line)
         .collect()
+}
+
+#[derive(Default)]
+struct BlockImports(Vec<usize>);
+
+impl Visit<'_> for BlockImports {
+    fn visit_block(&mut self, block: &Block) {
+        for statement in &block.stmts {
+            if let Stmt::Item(Item::Use(import)) = statement {
+                self.0.push(import.use_token.span.start().line);
+            }
+        }
+        visit::visit_block(self, block);
+    }
+}
+
+fn imports_inside_blocks(text: &str) -> Vec<usize> {
+    let file = syn::parse_file(text).expect("the file parses");
+    let mut imports = BlockImports::default();
+    imports.visit_file(&file);
+    imports.0
+}
+
+#[test]
+fn imports_are_at_module_level() {
+    let mut problems = Vec::new();
+    for path in rust_files() {
+        let text = std::fs::read_to_string(&path).expect("the file can be read");
+        for line in imports_inside_blocks(&text) {
+            problems.push(format!(
+                "{}:{line}: a use inside a function; move it to the top of the module",
+                path.display()
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+#[test]
+fn import_check_finds_violations() {
+    let text = "use a::b;\n\nmod m {\n    use c::d;\n}\n\nfn f() {\n    use e::f;\n    let g = || {\n        use h::i;\n    };\n}\n";
+    assert_eq!(imports_inside_blocks(text), [8, 10]);
 }
 
 #[test]
